@@ -407,6 +407,87 @@ DB 서버 자체가 멈추면 SQL 취소도 처리하지 못합니다. 소켓 �
 
 `DatabaseTimeoutCheck`는 비밀번호 변경·관리자 기한이 소켓 읽기 상한 이상이거나 명시한 소켓·취소 제한이 0 이하이면 시작을 거부합니다. JDBC URL이 풀 정책을 덮어쓰지 못하도록 `USER_DB_URL`(또는 Hikari JDBC URL)의 `socketTimeout`·`cancelSignalTimeout`·`options`도 거부합니다. SSL·`currentSchema`는 URL에서 지정할 수 있습니다. Flyway는 같은 URL·계정으로 별도 연결을 사용하므로 앱 풀의 짧은 제한을 마이그레이션에 적용하지 않습니다.
 
+## 송금 완료 알림 (Kafka → Slack)
+
+payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.completed`, 계약은 [송금 가이드](payment-transfer.md#이벤트-계약))를 받아 Slack 채널에 알립니다(2026-11-20). 송금 처리와는 분리되어 있어, 이 소비자나 Slack이 멈춰도 송금은 그대로 완료됩니다.
+
+```
+송금 완료 · 1,000 KRW · 2026-11-20 16:50:41 KST · transfer ac625422-43d6-4e54-978e-17b7d7d81822
+보낸 분 홍*동 (1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed) -1,000 KRW
+받는 분 김*수 (6ecd8c99-4036-403d-bf84-cf8400f67836) +1,000 KRW
+```
+
+- 첫 줄은 금액·통화·완료 시각(KST)·송금 ID입니다. `amount`는 최소 단위 정수라 통화의 소수 자릿수로 나눠 씁니다(USD 1050 → `10.50 USD`).
+- 둘째·셋째 줄은 보낸 분·받는 분의 마스킹한 이름과 회원 ID, 각자 기준의 증감(보낸 분 `-`, 받는 분 `+`)입니다. 이름은 이벤트의 `senderId`·`receiverId`로 회원을 조회해 관리자 회원 검색과 같은 규칙으로 가립니다(`홍*동`). 회원을 찾지 못하면 이름 자리에 `알 수 없는 회원`을 쓰고 알림은 그대로 보냅니다.
+- 실명 전체와 전화번호는 Slack으로 보내지 않습니다. 회원 ID·이름은 문구를 만들 때만 쓰고 `transfer_notifications`에는 저장하지 않습니다.
+- 후속 작업: 프런트 송금 내역·상세 화면은 상대방을 회원 ID로만 보여 줍니다. 상대방 마스킹 이름을 보여 주려면 payment-service 송금 응답에 이름을 추가하고 프런트를 함께 고쳐야 합니다(미착수).
+
+### 처리 순서
+
+`TransferCompletedConsumer`(컨슈머 그룹 `user-transfer-notification`) → `TransferNotificationService`
+
+1. 헤더 `eventId`(UUID)와 값 JSON을 읽습니다. 헤더가 없거나 JSON이 깨졌거나 값이 계약과 다르면(금액 0 이하, 알 수 없는 통화 등) 재시도 없이 ERROR 로그를 남기고 다음 메시지로 넘어갑니다.
+2. 수신 기록 트랜잭션: `transfer_notifications`에 `insert ... on conflict (event_id) do nothing`. 처음 받은 이벤트만 `notified_at`이 빈 행으로 들어갑니다.
+3. 알림 트랜잭션: 그 행을 `select ... for update`로 잠근 뒤
+   - `notified_at`이 있으면 이미 알린 이벤트(중복 전달)라 끝납니다.
+   - Webhook이 설정되지 않았으면 보내지 않고 끝납니다(행은 미발송으로 남음).
+   - 아니면 Slack에 보내고, 성공하면 `notified_at`을 남기고 커밋합니다.
+4. Slack 전송이나 DB가 실패하면 알림 트랜잭션만 롤백되고, 1초 간격으로 2번 다시 처리합니다. 그래도 실패하면 ERROR 로그를 남기고 다음 메시지로 넘어갑니다. 수신 기록은 미발송(`notified_at` null)으로 남고, 같은 이벤트가 다시 오면(payment 재발행) 그때 보냅니다.
+
+- 행 잠금 안에서 보내므로 같은 이벤트가 동시에 와도 한 번만 보냅니다. 다만 Slack 전송이 성공한 뒤 커밋이 실패하면 재처리에서 한 번 더 보낼 수 있습니다(at-least-once).
+- Slack 호출은 연결 2초·응답 3초에서 포기합니다. 알림 트랜잭션이 DB 연결과 행 잠금을 쥔 채 기다리므로 길게 두지 않습니다.
+- 포기한 이벤트를 자동으로 다시 보내는 스케줄러나 DLT는 없습니다. 미발송 건은 `select * from user_service.transfer_notifications where notified_at is null`로 봅니다.
+
+### 설정
+
+| 키 | 로컬 | 운영 | 설명 |
+|---|---|---|---|
+| `spring.kafka.bootstrap-servers` | `${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}` | 같음 | |
+| `travelpay.user.transfer-notification.consumer-enabled` | `true` | `false` | 끄면 컨테이너를 시작하지 않고, 이벤트는 토픽에 남아 켤 때 이어서 읽습니다 |
+| `travelpay.user.transfer-notification.concurrency` | `1` | `1` | 토픽 파티션(3)보다 많으면 남는 소비자는 쉽니다 |
+| `travelpay.user.transfer-notification.slack-webhook-url` | `${SLACK_WEBHOOK_URL:}` | 같음 | 비어 있으면 기록만 하고 보내지 않습니다 |
+
+- **Webhook 주소는 비밀값입니다.** 환경 변수 `SLACK_WEBHOOK_URL`로만 넘기고 설정 파일·`.env.example`·문서·커밋에 적지 않습니다. 앱은 주소를 로그·예외 메시지에 남기지 않습니다(전송 실패는 `HTTP 500`이나 예외 종류만 남김).
+- 운영은 payment 발행기와 마찬가지로 운영 Kafka 주소를 인프라와 정할 때까지 꺼 둡니다. 켤 때는 컨슈머 그룹이 처음 붙으므로 토픽에 남은 이벤트를 처음부터 읽습니다(`auto-offset-reset: earliest`).
+
+### 로컬에서 실행
+
+```bash
+docker compose up -d postgres redis-session kafka
+set -a; source .env; set +a
+export SLACK_WEBHOOK_URL='<Slack Incoming Webhook 주소>'   # 없으면 기록만 함
+./gradlew :user-service:bootRun
+```
+
+payment-service도 발행기가 켜진 기본 설정으로 띄운 뒤 송금 하나를 완료하면 채널에 위 문구가 올라옵니다. Kafka 없이 띄울 때는 `--travelpay.user.transfer-notification.consumer-enabled=false`로 소비자를 끕니다(Kafka 없이 소비자를 켠 기동은 2026-11-20 기준 직접 확인하지 않음).
+
+jar로 띄울 때도 환경 변수는 같은 방법으로 넘깁니다. 앱은 `.env`를 직접 읽지 않습니다.
+
+```bash
+./gradlew :user-service:bootJar
+set -a; source .env; set +a
+nohup java -jar user-service/build/libs/user-service-0.0.1-SNAPSHOT.jar > /dev/null 2>&1 &
+```
+
+- 로그는 `infra/monitoring/.local-logs/user-service.log`에 남습니다(저장소 루트에서 실행한 경우).
+- `.env`에 `KEY = "값"`처럼 `=` 앞뒤에 공백이 있으면 `source`가 그 줄을 명령으로 읽어 `command not found`를 내고 그 변수는 비어 있습니다. `KEY="값"`으로 씁니다.
+
+### 로컬 수동 확인 (2026-11-20)
+
+payment 쪽 [로컬 수동 확인](payment-transfer.md#로컬-수동-확인-2026-11-20)에서 토픽에 들어간 송금 완료 이벤트 1건을, 소비자를 넣은 jar로 user-service를 재시작해 받았습니다.
+
+| 항목 | 확인 결과 |
+|---|---|
+| 마이그레이션 | `V4 create transfer notifications` 성공(17:18:41 KST) |
+| 기동 | 13.3초, health `UP`. 컨슈머 그룹 `user-transfer-notification`에 파티션 0·1·2 배정 |
+| 수신 기록 | `transfer_notifications` 1행: `event_id` `d1fc7bae-…`, `transfer_id` `ac625422-…`, 1000 KRW, `received_at` 08:18:49.85Z, `notified_at` 08:18:50.75Z |
+| 로그 | `송금 완료 알림 보냄 eventId=d1fc7bae-… transferId=ac625422-…` (ERROR·WARN 없음) |
+| 오프셋 | 파티션 0 현재 1 / 끝 1, lag 0 |
+
+- `notified_at`은 Slack이 성공 응답을 준 뒤에만 남으므로, 앱 기준으로는 전송이 성공했습니다. 채널에 올라온 실제 문구는 이 기록에 포함하지 않았습니다.
+- 그룹이 처음 붙어 저장된 오프셋이 없었기 때문에 `earliest`로 토픽 처음부터 읽었습니다. 그래서 **송금 완료(16:50:41 KST) 약 28분 뒤에 알림이 나갔습니다.** 운영에서 소비자를 켤 때도 토픽에 남은 이벤트가 이렇게 한꺼번에 나갑니다([설정](#설정) 참고).
+- 확인하지 않은 것: 중복 전달(같은 `eventId` 재수신) 시 재발송 안 함, Slack 실패 시 재시도와 미발송 행 남김, Kafka 정지 중 기동. 이 동작은 `TransferNotificationServiceTest`·`TransferCompletedConsumerIntegrationTest`로만 확인했습니다.
+
 ## DB 스키마 (Flyway)
 
 테이블과 초기 데이터는 `user-service/src/main/resources/db/migration`의 `V번호__설명.sql` 파일로 관리합니다. 앱이 시작할 때 Flyway가 아직 적용하지 않은 파일만 번호 순서대로 실행하고 실행 기록을 `user_service.flyway_schema_history`에 남깁니다. Hibernate는 표를 만들거나 바꾸지 않고 엔티티와 맞는지 검사만 합니다(`ddl-auto: validate`).
@@ -416,6 +497,7 @@ DB 서버 자체가 멈추면 SQL 취소도 처리하지 못합니다. 소켓 �
 | `V1__create_user_tables.sql` | 회원·로그인 수단·약관·약관 동의 표 |
 | `V2__seed_initial_terms.sql` | 초기 약관 `SERVICE_TERMS`·`PRIVACY_TERMS` |
 | `V3__add_users_session_version.sql` | 회원별 세션 버전 `session_version`(기존 회원은 0) |
+| `V4__create_transfer_notifications.sql` | 송금 완료 이벤트 수신 기록 `transfer_notifications`([송금 완료 알림](#송금-완료-알림-kafka--slack)) |
 
 - 이미 적용한 파일은 고치지 않습니다. 고치면 앱이 시작할 때 검증에서 멈춥니다. 구조나 데이터를 바꿀 때는 다음 번호의 새 파일을 추가합니다.
 - 엔티티를 바꾸면 같은 작업에서 마이그레이션 파일도 추가합니다. `FlywayMigrationTest`가 마이그레이션 결과를 엔티티 기준 스키마와 비교해 다르면 실패합니다.
@@ -429,7 +511,7 @@ DB 서버 자체가 멈추면 SQL 취소도 처리하지 못합니다. 소켓 �
 ./gradlew :user-service:test
 ```
 
-테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다.
+테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다.
 
 비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 관리자 API는 실제 HTTP·PostgreSQL·Redis로 MASTER 권한·CSRF·세션 버전·검색·약관 등록을, 실제 PostgreSQL로 동시 정지·잠금 대기·약관 동시 등록을 확인합니다. 세션 Redis가 꺼진 상태와 메모리가 가득 찬 상태의 health도 확인합니다. API 문서는 실제 HTTP로 그룹·입력칸과 로그인·CSRF 표시가 실제 보안 동작과 같은지, 배포 설정에서 문서 주소가 꺼지는지 확인합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
 

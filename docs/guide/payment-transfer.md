@@ -622,7 +622,7 @@ flowchart TD
 - `amount`는 통화별 최소 단위 정수, `completedAt`은 송금이 `COMPLETED`로 바뀐 시각(UTC, 송금 `updatedAt`과 같은 값)입니다. `memo`·지갑 ID·멱등성 키는 넣지 않습니다.
 - 전달은 at-least-once입니다. 같은 이벤트가 두 번 올 수 있으므로 소비자는 `eventId`로 중복을 걸러야 합니다. 순서는 보장하지 않습니다(송금 하나에 이벤트 하나라 순서가 필요 없음).
 - `COMPLETED`만 발행합니다. `FAILED`·`MANUAL_REVIEW`·`PROCESSING`은 발행하지 않습니다. 테이블을 만들기 전에 완료된 송금은 발행하지 않습니다(backfill 없음).
-- 소비자(user-service)는 이 문서 범위 밖입니다. `schemaVersion`·보관 기간은 팀 리뷰에서 정합니다.
+- 소비자는 user-service입니다(2026-11-20). eventId로 중복을 거르고 Slack 채널에 알립니다. 자세한 동작은 [User 가이드의 송금 완료 알림](user-service.md#송금-완료-알림-kafka--slack)에 있습니다. `schemaVersion`·보관 기간은 팀 리뷰에서 정합니다.
 
 ### 기록 (Outbox)
 
@@ -654,6 +654,49 @@ flowchart TD
 - 발행기는 Kafka가 멈추면 주기마다 몇 초씩 막히므로 복구 스케줄러와 다른 스레드에서 돕니다([복구 스케줄러](#복구-스케줄러)의 스레드 수).
 - **운영(`application-prod.yml`)에서는 발행기가 꺼져 있습니다.** 운영 Kafka 주소(`KAFKA_BOOTSTRAP_SERVERS`)를 인프라와 정한 뒤 켭니다. 그동안 운영의 완료 이벤트는 `PENDING`으로 쌓이고, 켜는 순간 쌓인 이벤트가 한꺼번에 발행됩니다. 오래된 알림을 보내지 않으려면 켜기 전에 쌓인 행을 정리할지 정해야 합니다.
 - `PUBLISHED` 행 정리(보관 기간)와 미발행 건수 지표·알림은 아직 없습니다. 미발행 건은 `select count(*) from transfer_outbox where status = 'PENDING'`으로 봅니다.
+
+### 로컬 수동 확인 (2026-11-20)
+
+테스트(`TransferOutboxPublisherIntegrationTest`)와 별개로, 로컬에서 실제 송금을 완료시키고 토픽에 메시지가 들어온 것을 직접 확인했습니다.
+
+**확인 방법**
+
+1. `docker compose up -d kafka kafka-ui`로 Kafka와 Kafka UI를 띄우고, payment-service를 발행기가 켜진 기본 설정으로 실행합니다.
+2. [송금 요청](#송금-요청)으로 송금을 `COMPLETED`까지 보냅니다.
+3. 아래 둘 중 하나로 `payment.transfer.completed` 토픽을 봅니다.
+   - Kafka UI: `http://localhost:8989` → Topics → `payment.transfer.completed` → Messages
+   - 콘솔 컨슈머:
+     ```bash
+     docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+       --bootstrap-server localhost:29092 --topic payment.transfer.completed \
+       --from-beginning --property print.key=true --property print.headers=true
+     ```
+
+**받은 메시지 (값)**
+
+```json
+{
+  "amount": 1000,
+  "currency": "KRW",
+  "senderId": "6e256616-4487-4c30-bcb9-2d0595406e2f",
+  "receiverId": "81520986-e5d6-4dc9-adfe-51ceea69eab1",
+  "transferId": "ac625422-43d6-4e54-978e-17b7d7d81822",
+  "completedAt": "2026-11-20T07:50:41.938833Z"
+}
+```
+
+- [이벤트 계약](#이벤트-계약)의 6개 필드가 모두 있고, 그 밖의 필드(`memo`·지갑 ID·멱등성 키)는 없습니다. 필드 순서는 계약에 포함되지 않습니다.
+- `amount`는 최소 단위 정수(KRW 1000원), `completedAt`은 UTC ISO-8601입니다(한국 시간 16:50:41).
+- 같은 송금 건의 키·헤더·Outbox 상태도 확인했습니다(17:20 KST 조회).
+
+| 항목 | 확인 결과 |
+|---|---|
+| 키 | `ac625422-43d6-4e54-978e-17b7d7d81822` (= `transferId`), 파티션 0 |
+| 헤더 | `eventId:d1fc7bae-2da5-4d53-a7c7-48cf5d75bf6c` (= Outbox 행 `id`) |
+| Outbox 행 | `PUBLISHED`, `retry_count` 0, 기록 07:50:41.94Z → 발행 07:50:43.31Z (약 1.4초, 발행 주기 1초 안팎) |
+| 소비 | user-service 컨슈머 그룹 `user-transfer-notification`이 같은 `eventId`를 받아 Slack 알림까지 처리(lag 0). [User 가이드의 로컬 수동 확인](user-service.md#로컬-수동-확인-2026-11-20) |
+
+- 키·헤더 조회는 위 콘솔 컨슈머 명령에 `--property print.partition=true --timeout-ms 8000`을 더해 실행했습니다. 끝에 나오는 `Error processing message, terminating consumer process`는 대기 시간이 끝나 종료한다는 뜻이라 무시합니다. Git Bash에서는 `docker exec` 경로가 바뀌지 않게 `MSYS_NO_PATHCONV=1`을 먼저 설정합니다.
 
 ## 다른 서비스 호출
 
@@ -1604,7 +1647,7 @@ flowchart LR
 
 #### Outbox·DLT와 현재 구조
 
-- **현재 구조**: 송금은 원장에 동기 HTTP(Feign)로 거래를 등록합니다(`POST /internal/v1/ledger/transactions`). 이 절은 원장 연동(자금 경로) 이야기입니다. payment-service의 Kafka는 송금 완료 알림 이벤트 발행에만 쓰고(2026-11-15, [송금 완료 이벤트](#송금-완료-이벤트-kafka)), 소비자는 없습니다.
+- **현재 구조**: 송금은 원장에 동기 HTTP(Feign)로 거래를 등록합니다(`POST /internal/v1/ledger/transactions`). 이 절은 원장 연동(자금 경로) 이야기입니다. payment-service의 Kafka는 송금 완료 알림 이벤트 발행에만 쓰고(2026-11-15, [송금 완료 이벤트](#송금-완료-이벤트-kafka)), 소비자는 user-service의 Slack 알림 하나입니다(2026-11-20).
 - **동기로 두는 이유**: 원장 결과가 사용자 응답(201 완료 / 422 잔액 부족 / 202 결과 모름)에 바로 필요합니다. 원장 호출을 비동기로 바꾸면 모든 송금이 202가 되고, 클라이언트가 결과를 따로 조회해야 합니다. 전달 대상도 원장 하나뿐이고, 원장이 reference 멱등을 이미 제공합니다.
 
 Outbox·DLT가 막는 문제를 송금은 아래처럼 막습니다. 같은 문제를 다루지만 같은 패턴은 아닙니다.
