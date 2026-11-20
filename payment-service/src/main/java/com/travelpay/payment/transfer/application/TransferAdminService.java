@@ -55,15 +55,18 @@ public class TransferAdminService {
     private final TransferRepository transferRepository;
     private final TransferStatusHistoryRepository historyRepository;
     private final TransferLedgerReader ledgerReader;
+    private final TransferCompletedOutboxWriter completedOutboxWriter;
     private final TransactionTemplate transactionTemplate;
 
     public TransferAdminService(TransferRepository transferRepository,
             TransferStatusHistoryRepository historyRepository,
             TransferLedgerReader ledgerReader,
+            TransferCompletedOutboxWriter completedOutboxWriter,
             PlatformTransactionManager transactionManager) {
         this.transferRepository = transferRepository;
         this.historyRepository = historyRepository;
         this.ledgerReader = ledgerReader;
+        this.completedOutboxWriter = completedOutboxWriter;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -81,6 +84,7 @@ public class TransferAdminService {
      *         원장 거절 사유는 이전의 다른 요청 것일 수 있어 쓰지 않고 실패 사유를 NOT_PROCESSED로 정함(확정 이력과 같은 트랜잭션에 저장)</li>
      * </ul>
      * 원장 조회는 DB 트랜잭션 밖에서 하고, 조건부 UPDATE(MANUAL_REVIEW일 때만)와 이력 저장은 한 트랜잭션으로 묶습니다.
+     * COMPLETED로 확정하면 같은 트랜잭션에서 완료 이벤트도 Outbox에 기록합니다({@link TransferCompletedOutboxWriter}).
      * 원장 조회 실패(타임아웃·5xx 등)는 상태를 바꾸지 않고 common 규칙의 5xx로 응답합니다.
      * 이미 확정된 송금에 같은 요청이 다시 오면 기존 결과(현재 상태)를 200으로, 다른 요청이면 409를 돌려줍니다({@link #replay}).
      */
@@ -115,6 +119,9 @@ public class TransferAdminService {
             }
             historyRepository.save(TransferStatusHistory.byOperator(transferId, TransferStatus.MANUAL_REVIEW, target,
                     reason, admin.userId(), ledgerTransactionId, now));
+            if (target == TransferStatus.COMPLETED) {
+                completedOutboxWriter.record(transfer, now);
+            }
             return true;
         });
         if (!Boolean.TRUE.equals(applied)) {

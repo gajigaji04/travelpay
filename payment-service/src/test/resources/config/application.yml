@@ -1,0 +1,7 @@
+# 테스트 공통 설정입니다. main의 application.yml 위에 덮어씁니다(classpath:/config/가 우선).
+# Kafka 없이 도는 테스트에서 송금 Outbox 발행기·토픽 선언이 브로커에 붙지 않게 끕니다.
+# 발행을 확인하는 테스트는 발행기(TransferOutboxPublisher)를 직접 호출합니다.
+transfer:
+  outbox:
+    publisher:
+      enabled: false

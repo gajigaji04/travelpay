@@ -34,6 +34,7 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -77,7 +78,8 @@ class TransferServiceTest {
         when(ledgerClient.register(any())).thenThrow(TransferLedgerException.notSent("test"));
         when(transferRepository.findById(any()))
                 .thenAnswer(invocation -> Optional.ofNullable(stored.get(invocation.getArgument(0))));
-        transferService = new TransferService(transferRepository, walletReader, userReader, ledgerClient);
+        transferService = new TransferService(transferRepository, walletReader, userReader, ledgerClient,
+                mock(TransferCompletedOutboxWriter.class), mock(PlatformTransactionManager.class));
     }
 
     @Test

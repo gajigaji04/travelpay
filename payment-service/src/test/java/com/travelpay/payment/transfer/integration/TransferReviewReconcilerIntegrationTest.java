@@ -13,6 +13,7 @@ import java.util.UUID;
 import com.travelpay.common.auth.AuthHeaders;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
+import com.travelpay.payment.transfer.application.TransferCompletedOutboxWriter;
 import com.travelpay.payment.transfer.application.TransferReviewReconciler;
 import com.travelpay.payment.transfer.client.TransferLedgerReader;
 import com.travelpay.payment.transfer.domain.TransferRepository;
@@ -61,6 +62,9 @@ class TransferReviewReconcilerIntegrationTest extends TransferApiIntegrationSupp
     private TransferLedgerReader ledgerReader;
 
     @Autowired
+    private TransferCompletedOutboxWriter completedOutboxWriter;
+
+    @Autowired
     private PlatformTransactionManager transactionManager;
 
     private final UUID ledgerTransactionId = UUID.randomUUID();
@@ -74,7 +78,7 @@ class TransferReviewReconcilerIntegrationTest extends TransferApiIntegrationSupp
     void setUpReconciler() {
         meterRegistry = new SimpleMeterRegistry();
         reconciler = new TransferReviewReconciler(transferRepository, historyRepository, ledgerReader,
-                transactionManager, meterRegistry);
+                completedOutboxWriter, transactionManager, meterRegistry);
         now = Instant.now();
         // 다른 테스트가 남긴 송금이 있어도 원장 기록 없음으로 보고 건드리지 않게 합니다.
         when(ledgerFeignApi.getTransaction(eq("TRANSFER"), any())).thenThrow(notFound());

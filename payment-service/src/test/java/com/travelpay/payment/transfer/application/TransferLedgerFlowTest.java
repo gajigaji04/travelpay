@@ -32,9 +32,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -69,12 +71,14 @@ class TransferLedgerFlowTest {
 
     private final Map<UUID, Transfer> store = new LinkedHashMap<>();
     private TransferRepository transferRepository;
+    private TransferCompletedOutboxWriter outboxWriter;
     private FakeLedger ledger;
     private TransferService transferService;
 
     @BeforeEach
     void setUp() {
         transferRepository = mock(TransferRepository.class);
+        outboxWriter = mock(TransferCompletedOutboxWriter.class);
         givenInMemoryRepository();
         ledger = new FakeLedger(10_000L, 0L);
         transferService = newServiceWith(ledger);
@@ -92,6 +96,56 @@ class TransferLedgerFlowTest {
                 new LedgerTransactionRequest.Entry("USER", SOURCE_WALLET_ID, "KRW", "DEBIT", 3_000L, "TRANSFER_OUT"),
                 new LedgerTransactionRequest.Entry("USER", TARGET_WALLET_ID, "KRW", "CREDIT", 3_000L, "TRANSFER_IN")
         ))), ledger.requests);
+    }
+
+    /** COMPLETED로 바꾼 호출만 완료 이벤트를 기록합니다. 기록 시각은 상태 변경에 쓴 시각과 같습니다. */
+    @Test
+    void recordsCompletedEventOnceWhenTransferCompletes() {
+        TransferResponse response = transferService.request(SENDER_ID, KEY, REQUEST);
+        // 같은 키 재요청은 원장도 부르지 않고 이벤트도 다시 기록하지 않습니다.
+        transferService.request(SENDER_ID, KEY, REQUEST);
+
+        assertEquals(TransferStatus.COMPLETED, response.status());
+        ArgumentCaptor<Instant> finishedAt = ArgumentCaptor.forClass(Instant.class);
+        verify(transferRepository).finishProcessing(eq(response.transferId()), eq(TransferStatus.COMPLETED), isNull(),
+                finishedAt.capture());
+        verify(outboxWriter).record(onlyTransfer(), finishedAt.getValue());
+    }
+
+    @Test
+    void doesNotRecordCompletedEventWhenTransferFails() {
+        ledger.rejectWith = RejectReason.WALLET_SUSPENDED;
+
+        assertThrows(BusinessException.class, () -> transferService.request(SENDER_ID, KEY, REQUEST));
+
+        assertEquals(TransferStatus.FAILED, onlyTransfer().getStatus());
+        verify(outboxWriter, never()).record(any(), any());
+    }
+
+    /** 원장은 POSTED인데 다른 곳에서 먼저 반영해 0행이 바뀌면(이미 PROCESSING이 아님) 이벤트를 기록하지 않습니다. */
+    @Test
+    void doesNotRecordCompletedEventWhenAnotherCallAlreadySettledTransfer() {
+        ledger.onRegister = request -> {
+            LedgerTransactionResponse result = ledger.apply(request);
+            ReflectionTestUtils.setField(store.get(request.referenceId()), "status", TransferStatus.COMPLETED);
+            return result;
+        };
+
+        TransferResponse response = transferService.request(SENDER_ID, KEY, REQUEST);
+
+        assertEquals(TransferStatus.COMPLETED, response.status());
+        verify(outboxWriter, never()).record(any(), any());
+    }
+
+    /** 이벤트 기록이 실패하면 결과 모름으로 두어(실제 DB에서는 상태 변경도 롤백) 복구가 다시 반영하게 합니다. */
+    @Test
+    void treatsCompletedEventRecordFailureAsUnknown() {
+        doThrow(new DataAccessResourceFailureException("outbox")).when(outboxWriter).record(any(), any());
+
+        transferService.request(SENDER_ID, KEY, REQUEST);
+
+        verify(transferRepository).recordUnknownAttempt(eq(onlyTransfer().getId()), eq(0),
+                eq(TransferStatus.PROCESSING), isNull(), any(Instant.class));
     }
 
     @Test
@@ -769,7 +823,9 @@ class TransferLedgerFlowTest {
         TransferUserReader userReader = mock(TransferUserReader.class);
         when(userReader.findRecipient(RECEIVER_ID))
                 .thenReturn(Optional.of(new UserRecipientResponse(RECEIVER_ID, "홍길동")));
-        return new TransferService(transferRepository, walletReader, userReader, fakeLedger);
+        // 트랜잭션 관리자는 Mock이라 TransactionTemplate은 콜백만 실행합니다(실제 롤백은 TransferOutboxIntegrationTest에서 확인).
+        return new TransferService(transferRepository, walletReader, userReader, fakeLedger, outboxWriter,
+                mock(PlatformTransactionManager.class));
     }
 
     private Transfer onlyTransfer() {
