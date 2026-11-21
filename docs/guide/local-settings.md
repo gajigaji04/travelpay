@@ -332,5 +332,6 @@ PostgreSQL의 새 데이터 볼륨을 처음 준비할 때 컨테이너 초기�
 | `Port ... was already in use` | 같은 앱이나 이전 실행이 포트를 사용 중인지. IDE의 해당 실행을 종료한 뒤 다시 시작 |
 | 다른 서비스를 찾지 못함 | Eureka와 대상 앱이 실행됐는지, 직접 URL이 필요한 클라이언트인지 |
 | Wallet·User의 Kafka 오류 반복 | Kafka가 실행 중이며 앱의 접속 주소가 `localhost:9092`인지 |
+| Gateway `8080`을 다른 프로그램이 사용 중 | `--server.port=18088`처럼 다른 포트로 실행하고 프런트·호출 주소도 맞춤. 관리 포트 기본값이 `18080`이라 `--server.port=18080`은 `Management-specific server address cannot be configured ...`로 시작에 실패함(관리 포트는 `GATEWAY_MANAGEMENT_PORT`로 변경) |
 
 IDE에서 Stop한 앱의 프로세스가 종료되면 그 프로세스가 사용하던 포트가 해제됩니다. Docker로 실행한 인프라의 수명은 별개이므로 `docker compose ps`로 상태를 확인합니다.
