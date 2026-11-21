@@ -183,13 +183,21 @@ sequenceDiagram
     "status": "COMPLETED",
     "failureReason": null,
     "memo": "저녁값",
-    "createdAt": "2026-11-02T01:02:03.123456Z"
+    "createdAt": "2026-11-02T01:02:03.123456Z",
+    "counterpartName": "김*수"
   },
   "error": null
 }
 ```
 
 응답에는 지갑 ID·멱등성 키·운영용 검토 사유(`reviewReason`)·수정 시각을 담지 않습니다. `direction`은 요청자 기준으로 `SENT`(보낸 송금) 또는 `RECEIVED`(받은 송금)입니다.
+
+`counterpartName`은 상대방(`SENT`면 수취인, `RECEIVED`면 송금인)의 마스킹한 이름입니다(2026-11-21, 포크). 송금 요청·상세·내역 응답 모두에 있으며, 이름은 user-service 일괄 이름 조회([다른 서비스 호출](#다른-서비스-호출))로 채웁니다.
+
+- 회원 서비스 호출이 실패하거나(연결·타임아웃·오류 응답) 상대 회원이 없으면 `null`이고 응답은 그대로 성공합니다. 화면은 이때 회원 ID 등으로 대신 표시합니다. 이름은 보조 정보라 이 실패로 송금 조회를 막지 않습니다.
+- DB 조회 트랜잭션이 끝난 뒤 컨트롤러에서 채우므로(`TransferCounterpartNames`) user-service를 기다리는 동안 DB 연결을 잡지 않습니다. 내역은 한 페이지의 상대방을 모아 한 번만 조회합니다.
+- 정지·종료 회원도 지난 송금의 상대이므로 이름을 보여 줍니다(수취인 확인은 지금처럼 `ACTIVE` 회원만).
+- 송금 요청 응답도 같은 방식으로 한 번 더 조회합니다(수취인 확인 때 읽은 실명을 넘겨받지 않음). 재요청(같은 키) 응답도 같은 값이 나옵니다.
 
 `failureReason`은 `FAILED`일 때만 값이 있고 그 밖의 상태는 `null`입니다. 값은 송금 요청 422 오류 코드에서 `TRANSFER_`를 뺀 이름과 같습니다(2026-11-12 팀 결정: 내부 오류 정보는 막고 사용자용 사유만 노출). 송금 요청이 `FAILED`가 되면 422 오류로 응답하므로, 실패 사유는 상세·내역 조회에서 확인합니다.
 
@@ -704,6 +712,7 @@ flowchart TD
 |---|---|---|
 | wallet-service | `GET /internal/v1/wallets?userId=` | `{walletId, status}`. `ACTIVE`만 송금 가능. 404 + `WALLET_NOT_FOUND`일 때만 지갑 없음 |
 | user-service | `GET /internal/v1/users/{userId}/real-name` (I02) | 200이면 `ACTIVE` 회원. 404 + `USER_RECIPIENT_NOT_FOUND`일 때만 회원 아님. 응답 `userId`가 요청과 다르면 502 |
+| user-service | `GET /internal/v1/users/display-names?ids=` (일괄 이름 조회, 2026-11-21) | 송금 응답의 `counterpartName`. 마스킹한 이름만 받음. 요청하지 않은 ID는 버림. **실패해도 오류로 바꾸지 않고 이름 없이(`null`) 응답**하며 WARN 로그만 남김(아래 실패 표 적용 안 함) |
 | ledger-service | `POST /internal/v1/ledger/transactions` | [원장 거래 등록](#원장-거래-등록) |
 
 지갑·회원 호출은 결제와 같은 Feign 클라이언트(`WalletFeignApi`·`UserFeignApi`)를 쓰며 타임아웃은 연결 0.5초, 읽기 1초입니다(2026-11-12 조정, [타임아웃 조정안](#타임아웃-조정안)). 원장은 연결 0.5초, 읽기 6초입니다. 사용자 요청 중의 호출에는 common `InternalHeaderRelayInterceptor`가 요청자의 `User-Id`·`User-Role`을 붙입니다. 지갑·회원 호출 실패는 common `FeignErrors.toCommonException()` 규칙을 따릅니다.

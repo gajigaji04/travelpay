@@ -85,7 +85,7 @@ public class SecurityConfiguration {
                         // 팀 결정(2026-10-31): 서비스 간 호출은 서비스 인증 없이 내부망 격리로 보호하므로 세션 없이 엽니다.
                         // 외부 차단은 Gateway·배포 망이 맡고, 회원 헤더 검사·충전 예금주 본인 확인·수취인 실명 조회 횟수 제한은 컨트롤러와 응용 서비스가 맡습니다.
                         .requestMatchers(HttpMethod.GET, "/internal/v1/users/{userId}/real-name",
-                                "/internal/v1/users/{userId}/funding-identity").permitAll()
+                                "/internal/v1/users/{userId}/funding-identity", "/internal/v1/users/display-names").permitAll()
                         .requestMatchers(HttpMethod.POST, LOGOUT_PATH)
                         .access(CurrentMemberAuthorizationManager.sessionMembers(currentMemberService))
                         .requestMatchers("/api/v1/admin/**")

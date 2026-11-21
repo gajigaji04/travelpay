@@ -349,6 +349,7 @@ class AdminUserServiceIntegrationTest {
 
         @Override public User save(User user) { return delegate.save(user); }
         @Override public Optional<User> findById(UUID userId) { return delegate.findById(userId); }
+        @Override public List<User> findAllById(Collection<UUID> userIds) { return delegate.findAllById(userIds); }
         @Override public Optional<UserProfile> findProfile(UUID userId) { return delegate.findProfile(userId); }
         @Override public boolean existsByPhone(String phone) { return delegate.existsByPhone(phone); }
         @Override public boolean increaseSessionVersion(UUID userId) { return delegate.increaseSessionVersion(userId); }

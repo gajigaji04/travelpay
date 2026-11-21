@@ -206,8 +206,9 @@ Gateway를 거친 요청이 10초 안에 응답을 받지 못하면 `504 COMMON_
 |---|---|
 | `GET /internal/v1/users/{userId}/real-name` | 송금 수취인 실명 조회 |
 | `GET /internal/v1/users/{userId}/funding-identity` | 충전 예금주 확인(충전 요청자 본인 실명 조회) |
+| `GET /internal/v1/users/display-names?ids=` | 송금 내역 상대방 이름 일괄 조회(2026-11-21, 아래 [일괄 이름 조회](#송금-상대방-이름-일괄-조회)) |
 
-두 API의 성공 응답 형식은 같습니다. `realName`은 가입 때 입력한 성명이며 실명 확인 결과가 아닙니다. 이메일·휴대폰 번호는 담지 않으며, 화면에 보여 줄 이름의 마스킹은 호출한 서비스의 공개 응답에서 합니다.
+위 두 API(`real-name`·`funding-identity`)의 성공 응답 형식은 같습니다. `realName`은 가입 때 입력한 성명이며 실명 확인 결과가 아닙니다. 이메일·휴대폰 번호는 담지 않으며, 화면에 보여 줄 이름의 마스킹은 호출한 서비스의 공개 응답에서 합니다.
 
 ```json
 {
@@ -247,6 +248,15 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
   "$BASE/internal/v1/users/$REQUESTER_ID/funding-identity"
 ```
+
+#### 송금 상대방 이름 일괄 조회
+
+payment-service가 송금 응답의 `counterpartName`을 채울 때 부릅니다(2026-11-21, 포크). 회원 헤더 규칙은 위와 같습니다.
+
+- `ids`: 쉼표로 구분한 회원 UUID 1~100개(Feign은 `ids=a&ids=b`로 보내며 둘 다 받음). 비었거나 100개를 넘거나 UUID가 아니면 400 `COMMON_INVALID_REQUEST`. 중복 ID는 하나로 셈
+- 응답: `[{"userId": "...", "maskedName": "홍*동"}]`. **마스킹한 이름만** 내보내며(관리자 회원 검색과 같은 `PersonalInfoMasking.realName`), 실명·이메일·휴대폰 번호는 담지 않음
+- 회원 상태와 관계없이 이름을 돌려줌(지난 송금의 상대가 정지·종료됐어도 내역에는 이름을 보임). 없는 회원은 응답에서 빠짐
+- 아래 수취인 실명 조회 호출 제한을 **적용하지 않음**. payment가 요청자 본인 송금의 상대 ID만 넘기고, 실명이 아닌 마스킹 이름만 나가기 때문. 내부망 격리 전제는 다른 내부 API와 같음
 
 #### 송금 수취인 실명 조회의 요청자별 호출 제한
 
@@ -420,7 +430,7 @@ payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.comple
 - 첫 줄은 금액·통화·완료 시각(KST)·송금 ID입니다. `amount`는 최소 단위 정수라 통화의 소수 자릿수로 나눠 씁니다(USD 1050 → `10.50 USD`).
 - 둘째·셋째 줄은 보낸 분·받는 분의 마스킹한 이름과 회원 ID, 각자 기준의 증감(보낸 분 `-`, 받는 분 `+`)입니다. 이름은 이벤트의 `senderId`·`receiverId`로 회원을 조회해 관리자 회원 검색과 같은 규칙으로 가립니다(`홍*동`). 회원을 찾지 못하면 이름 자리에 `알 수 없는 회원`을 쓰고 알림은 그대로 보냅니다.
 - 실명 전체와 전화번호는 Slack으로 보내지 않습니다. 회원 ID·이름은 문구를 만들 때만 쓰고 `transfer_notifications`에는 저장하지 않습니다.
-- 후속 작업: 프런트 송금 내역·상세 화면은 상대방을 회원 ID로만 보여 줍니다. 상대방 마스킹 이름을 보여 주려면 payment-service 송금 응답에 이름을 추가하고 프런트를 함께 고쳐야 합니다(미착수).
+- 송금 응답의 상대방 이름: payment-service 송금 요청·상세·내역 응답에 `counterpartName`(마스킹)을 추가했습니다(2026-11-21, [일괄 이름 조회](#송금-상대방-이름-일괄-조회)). 프런트 화면 반영은 프런트 작업입니다.
 
 ### 처리 순서
 

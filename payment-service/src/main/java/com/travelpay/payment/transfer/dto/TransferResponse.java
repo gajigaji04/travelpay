@@ -44,10 +44,15 @@ public record TransferResponse(
         @Schema(description = "메모", nullable = true)
         String memo,
         @Schema(description = "생성 시각(UTC, ISO-8601)", example = "2026-11-02T01:02:03.123456Z")
-        Instant createdAt
+        Instant createdAt,
+        @Schema(description = """
+                상대방(SENT면 수취인, RECEIVED면 송금인)의 마스킹한 이름(예: 홍*동).
+                회원 서비스에서 이름을 가져오지 못했거나 회원이 없으면 null이며, 이때 화면은 회원 ID 등으로 대신 표시합니다.""",
+                nullable = true, example = "홍*동")
+        String counterpartName
 ) {
 
-    /** viewerId는 송금 당사자여야 하며, 당사자 확인은 호출자가 먼저 수행합니다. */
+    /** 상대방 이름은 비워 두고 만들며, 채우는 일은 TransferCounterpartNames가 트랜잭션 밖에서 맡습니다. viewerId는 송금 당사자여야 하며, 당사자 확인은 호출자가 먼저 수행합니다. */
     public static TransferResponse of(Transfer transfer, UUID viewerId) {
         TransferDirection direction = transfer.getSenderId().equals(viewerId)
                 ? TransferDirection.SENT : TransferDirection.RECEIVED;
@@ -61,7 +66,18 @@ public record TransferResponse(
                 transfer.getStatus(),
                 transfer.getStatus() == TransferStatus.FAILED ? transfer.getFailureReason() : null,
                 transfer.getMemo(),
-                transfer.getCreatedAt()
+                transfer.getCreatedAt(),
+                null
         );
+    }
+
+    /** 요청자 기준 상대방 회원 ID입니다. */
+    public UUID counterpartId() {
+        return direction == TransferDirection.SENT ? receiverId : senderId;
+    }
+
+    public TransferResponse withCounterpartName(String name) {
+        return new TransferResponse(transferId, direction, senderId, receiverId, amount, currency, status,
+                failureReason, memo, createdAt, name);
     }
 }
