@@ -86,7 +86,9 @@ class ApiDocsHttpTest {
     void eachGroupDocumentsOnlyItsExternalApis() throws Exception {
         assertThat(docs(USER_DOCS).path("paths").propertyNames()).containsExactlyInAnyOrder(
                 "/api/v1/auth/csrf", "/api/v1/auth/login", "/api/v1/auth/logout",
-                "/api/v1/users", "/api/v1/users/me", "/api/v1/users/me/password", "/api/v1/terms");
+                "/api/v1/users", "/api/v1/users/me", "/api/v1/users/me/password", "/api/v1/terms",
+                "/api/v1/users/me/notifications", "/api/v1/users/me/notifications/unread-count",
+                "/api/v1/users/me/notifications/{notificationId}/read", "/api/v1/users/me/notifications/read-all");
         assertThat(docs(ADMIN_DOCS).path("paths").propertyNames()).containsExactlyInAnyOrder(
                 "/api/v1/admin/users", "/api/v1/admin/users/{userId}/status",
                 "/api/v1/admin/users/{userId}/sessions", "/api/v1/admin/terms");
@@ -105,7 +107,9 @@ class ApiDocsHttpTest {
                         "query page", "query size"),
                 "GET /api/v1/admin/terms", List.of("query termsCode", "query page", "query size"),
                 "PATCH /api/v1/admin/users/{userId}/status", List.of("path userId"),
-                "DELETE /api/v1/admin/users/{userId}/sessions", List.of("path userId"));
+                "DELETE /api/v1/admin/users/{userId}/sessions", List.of("path userId"),
+                "GET /api/v1/users/me/notifications", List.of("query page", "query size"),
+                "PATCH /api/v1/users/me/notifications/{notificationId}/read", List.of("path notificationId"));
         documentedApis().forEach((api, operation) -> assertThat(operation.path("parameters").values())
                 .as(api)
                 .extracting(parameter -> parameter.path("in").asString() + " " + parameter.path("name").asString())
@@ -236,7 +240,7 @@ class ApiDocsHttpTest {
             }
         }
         // 문서가 비어 있으면 아래 확인이 아무것도 보지 않으므로 API 수를 먼저 봅니다.
-        assertEquals(12, apis.size());
+        assertEquals(16, apis.size());
         return apis;
     }
 
@@ -293,7 +297,8 @@ class ApiDocsHttpTest {
 
     private HttpResponse<String> call(DocumentedOperation operation, ClientSession session, boolean withCsrf)
             throws Exception {
-        var path = operation.path().replace("{userId}", UUID.randomUUID().toString());
+        var path = operation.path().replace("{userId}", UUID.randomUUID().toString())
+                .replace("{notificationId}", UUID.randomUUID().toString());
         var hasBody = Set.of("POST", "PUT", "PATCH").contains(operation.method());
         var request = HttpRequest.newBuilder(uri(path)).header("Cookie", session.cookie())
                 .method(operation.method(), hasBody

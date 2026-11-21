@@ -18,6 +18,7 @@ public enum UserErrorCode implements ErrorCode {
     ACCOUNT_CLOSED("USER_ACCOUNT_CLOSED", "이용이 종료된 계정입니다.", 403),
     RECIPIENT_NOT_FOUND("USER_RECIPIENT_NOT_FOUND", "수취인을 찾을 수 없습니다.", 404),
     NOT_FOUND("USER_NOT_FOUND", "회원을 찾을 수 없습니다.", 404),
+    NOTIFICATION_NOT_FOUND("USER_NOTIFICATION_NOT_FOUND", "알림을 찾을 수 없습니다.", 404),
     MASTER_PROTECTION_CONFLICT("USER_MASTER_PROTECTION_CONFLICT", "자기 계정은 정지할 수 없습니다.", 409),
     CLOSED_ACCOUNT_UNCHANGEABLE("USER_CLOSED_ACCOUNT_UNCHANGEABLE", "이용이 종료된 계정의 상태는 바꿀 수 없습니다.", 409),
     TERMS_VERSION_CONFLICT("USER_TERMS_VERSION_CONFLICT", "같은 약관 버전이나 같은 시행 시각의 약관이 이미 있습니다.", 409),

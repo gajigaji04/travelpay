@@ -175,6 +175,33 @@ class TransferCompletedConsumerIntegrationTest {
         assertEquals(1, bodiesFor(transferId).size());
         assertEquals(1, jdbc.queryForObject(
                 "select count(*) from user_service.transfer_notifications where event_id = ?", Integer.class, eventId));
+        assertEquals(2, screenNotifications(transferId).size(), "재전달돼도 화면 알림은 회원당 한 행");
+    }
+
+    // 이벤트 하나로 보낸 사람·받는 사람 화면 알림이 한 행씩 생기고, 상대방 ID가 서로 엇갈려 들어감
+    @Test
+    void eachPartyGetsOneUnreadScreenNotification() {
+        var transferId = UUID.randomUUID();
+        var eventId = UUID.randomUUID();
+        var senderId = UUID.randomUUID();
+        var receiverId = UUID.randomUUID();
+
+        send(transferId.toString(), eventId.toString(), payload(transferId, senderId, receiverId, 7000, "KRW"));
+        awaitNotified(eventId);
+
+        var rows = screenNotifications(transferId);
+        assertEquals(2, rows.size());
+        var byUser = new java.util.HashMap<UUID, Map<String, Object>>();
+        rows.forEach(row -> byUser.put((UUID) row.get("user_id"), row));
+        assertEquals("TRANSFER_SENT", byUser.get(senderId).get("type"));
+        assertEquals(receiverId, byUser.get(senderId).get("counterpart_id"));
+        assertEquals("TRANSFER_RECEIVED", byUser.get(receiverId).get("type"));
+        assertEquals(senderId, byUser.get(receiverId).get("counterpart_id"));
+        rows.forEach(row -> {
+            assertEquals(eventId, row.get("event_id"));
+            assertEquals(7000L, ((Number) row.get("amount")).longValue());
+            assertNull(row.get("read_at"));
+        });
     }
 
     // Slack이 계속 실패하면 1초 간격 2번 다시 보낸 뒤 포기하고 다음 메시지로 넘어감. 수신 기록은 미발송으로 남고,
@@ -193,6 +220,7 @@ class TransferCompletedConsumerIntegrationTest {
 
         assertEquals(3, bodiesFor(transferId).size());
         assertNull(notifiedAt(eventId));
+        assertEquals(2, screenNotifications(transferId).size(), "Slack이 실패해도 화면 알림은 남음");
 
         send(transferId.toString(), eventId.toString(), payload);
         awaitNotified(eventId);
@@ -214,6 +242,13 @@ class TransferCompletedConsumerIntegrationTest {
         assertEquals(0, jdbc.queryForObject(
                 "select count(*) from user_service.transfer_notifications where transfer_id = ?", Integer.class,
                 withoutHeader));
+    }
+
+    private List<Map<String, Object>> screenNotifications(UUID transferId) {
+        return jdbc.queryForList("""
+                select user_id, event_id, type, counterpart_id, amount, read_at
+                from user_service.user_notifications where transfer_id = ?
+                """, transferId);
     }
 
     /** 같은 키(같은 파티션)로 정상 이벤트를 보내고 그것이 알려질 때까지 기다립니다. */

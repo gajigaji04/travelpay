@@ -45,6 +45,10 @@ user-service는 일반 회원가입, 로그인·로그아웃, 비밀번호 변�
 | `POST /api/v1/auth/login` | 일반 로그인 | 불필요 | 필요 | 200 |
 | `GET /api/v1/users/me` | 내 정보 조회 | 필요 | 불필요 | 200 |
 | `PATCH /api/v1/users/me/password` | 현재 비밀번호 확인 후 비밀번호 변경 | 필요 | 필요 | 204 |
+| `GET /api/v1/users/me/notifications` | 내 화면 알림 목록([화면 알림](#화면-알림-송금-완료)) | 필요(USER) | 불필요 | 200 |
+| `GET /api/v1/users/me/notifications/unread-count` | 읽지 않은 알림 개수(프런트 주기 조회) | 필요(USER) | 불필요 | 200 |
+| `PATCH /api/v1/users/me/notifications/{notificationId}/read` | 알림 하나 읽음 표시 | 필요(USER) | 필요 | 200 |
+| `PATCH /api/v1/users/me/notifications/read-all` | 내 알림 모두 읽음 | 필요(USER) | 필요 | 200 |
 | `POST /api/v1/auth/logout` | 로그아웃 | 필요 | 필요 | 204 |
 | `GET /api/v1/admin/users` | 관리자 회원 검색(개인정보 마스킹) | ACTIVE MASTER | 불필요 | 200 |
 | `PATCH /api/v1/admin/users/{userId}/status` | 회원 정지·해제 | ACTIVE MASTER | 필요 | 200 |
@@ -437,7 +441,7 @@ payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.comple
 `TransferCompletedConsumer`(컨슈머 그룹 `user-transfer-notification`) → `TransferNotificationService`
 
 1. 헤더 `eventId`(UUID)와 값 JSON을 읽습니다. 헤더가 없거나 JSON이 깨졌거나 값이 계약과 다르면(금액 0 이하, 알 수 없는 통화 등) 재시도 없이 ERROR 로그를 남기고 다음 메시지로 넘어갑니다.
-2. 수신 기록 트랜잭션: `transfer_notifications`에 `insert ... on conflict (event_id) do nothing`. 처음 받은 이벤트만 `notified_at`이 빈 행으로 들어갑니다.
+2. 수신 기록 트랜잭션: `transfer_notifications`에 `insert ... on conflict (event_id) do nothing`. 처음 받은 이벤트만 `notified_at`이 빈 행으로 들어갑니다. 같은 트랜잭션에서 보낸 사람·받는 사람의 [화면 알림](#화면-알림-송금-완료)을 `user_notifications`에 한 행씩 만듭니다(`on conflict (event_id, user_id) do nothing`). 그래서 화면 알림은 Slack 설정·성공 여부와 관계없이 생깁니다.
 3. 알림 트랜잭션: 그 행을 `select ... for update`로 잠근 뒤
    - `notified_at`이 있으면 이미 알린 이벤트(중복 전달)라 끝납니다.
    - Webhook이 설정되지 않았으면 보내지 않고 끝납니다(행은 미발송으로 남음).
@@ -498,6 +502,50 @@ payment 쪽 [로컬 수동 확인](payment-transfer.md#로컬-수동-확인-2026
 - 그룹이 처음 붙어 저장된 오프셋이 없었기 때문에 `earliest`로 토픽 처음부터 읽었습니다. 그래서 **송금 완료(16:50:41 KST) 약 28분 뒤에 알림이 나갔습니다.** 운영에서 소비자를 켤 때도 토픽에 남은 이벤트가 이렇게 한꺼번에 나갑니다([설정](#설정) 참고).
 - 확인하지 않은 것: 중복 전달(같은 `eventId` 재수신) 시 재발송 안 함, Slack 실패 시 재시도와 미발송 행 남김, Kafka 정지 중 기동. 이 동작은 `TransferNotificationServiceTest`·`TransferCompletedConsumerIntegrationTest`로만 확인했습니다.
 
+## 화면 알림 (송금 완료)
+
+송금 완료 이벤트를 받으면 보낸 사람과 받는 사람에게 화면 알림을 하나씩 만듭니다(2026-11-21, 포크). 실시간 연결(SSE 등) 없이 **프런트가 읽지 않은 개수를 주기적으로 조회(폴링)** 하는 방식입니다(사용자 결정 2026-11-21: Gateway·다중 서버 변경 없이 가는 쪽).
+
+| `type` | 받는 회원 | 상대방(`counterpartId`) | 예시 문구(프런트) |
+|---|---|---|---|
+| `TRANSFER_SENT` | 보낸 사람 | 받는 사람 | 김\*수님에게 1,000원을 보냈어요 |
+| `TRANSFER_RECEIVED` | 받는 사람 | 보낸 사람 | 홍\*동님이 1,000원을 보냈어요 |
+
+- 문구는 서버가 만들지 않고 프런트가 `type`·`amount`·`currency`·`counterpartName`으로 만듭니다. `amount`는 최소 단위 정수입니다(송금 API와 같음).
+- `counterpartName`은 조회할 때 `users`에서 읽어 마스킹합니다(`홍*동`). 이름은 테이블에 저장하지 않으며, 회원을 찾지 못하면 `null`입니다.
+- 송금 상세는 `transferId`로 payment `GET /api/v1/transfers/{transferId}`를 부릅니다. 받는 사람에게는 `COMPLETED` 송금만 보이므로 알림의 송금은 항상 조회됩니다.
+- 운영은 소비자가 꺼져 있어([설정](#설정)) 화면 알림도 생기지 않습니다. 켜면 토픽에 남은 이벤트로 알림이 한꺼번에 생깁니다.
+- 보관 기간 정리(오래된 알림 삭제)는 없습니다(후속).
+
+### API
+
+모두 로그인 세션이 필요하고 `MASTER`는 403 `COMMON_FORBIDDEN`입니다(송금 API와 같은 방침). Gateway는 기존 `/api/v1/users/**` 라우트로 보내므로 Gateway 설정 변경이 없습니다.
+
+| API | 응답 `data` | 비고 |
+|---|---|---|
+| `GET /api/v1/users/me/notifications?page=0&size=20` | `PageResponse`(`items`·`page`·`size`·`totalElements`·`totalPages`) | 완료 시각 최신순(`occurredAt desc, id desc`). `page` 0 미만·`size` 1 미만은 400, `size` 100 초과는 100 |
+| `GET /api/v1/users/me/notifications/unread-count` | `{"count": 3}` | 폴링 대상. 부분 인덱스(`read_at is null`)로 셈 |
+| `PATCH /api/v1/users/me/notifications/{notificationId}/read` | `null` | CSRF 필요. 이미 읽은 알림도 200(처음 읽은 시각 유지). 없거나 다른 회원 알림은 404 `USER_NOTIFICATION_NOT_FOUND` |
+| `PATCH /api/v1/users/me/notifications/read-all` | `{"updated": 3}` | CSRF 필요. 읽지 않은 본인 알림만 바꿈 |
+
+목록 항목:
+
+```json
+{
+  "notificationId": "0f5b2c3e-…",
+  "type": "TRANSFER_RECEIVED",
+  "transferId": "ac625422-43d6-4e54-978e-17b7d7d81822",
+  "counterpartId": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed",
+  "counterpartName": "홍*동",
+  "amount": 1000,
+  "currency": "KRW",
+  "occurredAt": "2026-11-20T07:50:41.938833Z",
+  "read": false
+}
+```
+
+프런트 권장 사용법: 로그인 상태에서 `unread-count`를 30초마다 부르고 탭이 보이지 않을 때(`document.visibilityState`)는 멈춥니다. 개수가 늘면 목록을 다시 불러오고, 목록을 열거나 항목을 누를 때 읽음 표시를 보냅니다. 401이면 폴링을 멈춥니다.
+
 ## DB 스키마 (Flyway)
 
 테이블과 초기 데이터는 `user-service/src/main/resources/db/migration`의 `V번호__설명.sql` 파일로 관리합니다. 앱이 시작할 때 Flyway가 아직 적용하지 않은 파일만 번호 순서대로 실행하고 실행 기록을 `user_service.flyway_schema_history`에 남깁니다. Hibernate는 표를 만들거나 바꾸지 않고 엔티티와 맞는지 검사만 합니다(`ddl-auto: validate`).
@@ -508,6 +556,7 @@ payment 쪽 [로컬 수동 확인](payment-transfer.md#로컬-수동-확인-2026
 | `V2__seed_initial_terms.sql` | 초기 약관 `SERVICE_TERMS`·`PRIVACY_TERMS` |
 | `V3__add_users_session_version.sql` | 회원별 세션 버전 `session_version`(기존 회원은 0) |
 | `V4__create_transfer_notifications.sql` | 송금 완료 이벤트 수신 기록 `transfer_notifications`([송금 완료 알림](#송금-완료-알림-kafka--slack)) |
+| `V5__create_user_notifications.sql` | 회원 화면 알림 `user_notifications`, 유일 `(event_id, user_id)`, 목록·읽지 않은 개수 인덱스([화면 알림](#화면-알림-송금-완료)) |
 
 - 이미 적용한 파일은 고치지 않습니다. 고치면 앱이 시작할 때 검증에서 멈춥니다. 구조나 데이터를 바꿀 때는 다음 번호의 새 파일을 추가합니다.
 - 엔티티를 바꾸면 같은 작업에서 마이그레이션 파일도 추가합니다. `FlywayMigrationTest`가 마이그레이션 결과를 엔티티 기준 스키마와 비교해 다르면 실패합니다.
@@ -521,7 +570,7 @@ payment 쪽 [로컬 수동 확인](payment-transfer.md#로컬-수동-확인-2026
 ./gradlew :user-service:test
 ```
 
-테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다.
+테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다. 소비자 테스트는 이벤트 하나로 화면 알림이 보낸 사람·받는 사람에게 한 행씩 생기는지, 재전달·Slack 실패에도 그대로인지도 봅니다. 화면 알림 조회·읽음은 `UserNotificationServiceIntegrationTest`(PostgreSQL)·`UserNotificationControllerTest`가 확인합니다. DB 테스트 공통 설정(`PostgresJpaTestConfiguration`)은 앱처럼 `currentSchema=user_service`로 연결해 스키마 이름 없는 native SQL도 같은 표를 씁니다.
 
 비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 관리자 API는 실제 HTTP·PostgreSQL·Redis로 MASTER 권한·CSRF·세션 버전·검색·약관 등록을, 실제 PostgreSQL로 동시 정지·잠금 대기·약관 동시 등록을 확인합니다. 세션 Redis가 꺼진 상태와 메모리가 가득 찬 상태의 health도 확인합니다. API 문서는 실제 HTTP로 그룹·입력칸과 로그인·CSRF 표시가 실제 보안 동작과 같은지, 배포 설정에서 문서 주소가 꺼지는지 확인합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
 

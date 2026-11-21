@@ -29,7 +29,9 @@ public class PostgresJpaTestConfiguration {
                 .withDatabaseName("travelpay_user_test")
                 .withUsername("travelpay_test")
                 .withPassword(UUID.randomUUID().toString())
-                .withInitScript("postgres/user-schema.sql");
+                .withInitScript("postgres/user-schema.sql")
+                // 앱과 같이 스키마 이름 없는 native SQL(insert ... on conflict)도 user_service를 쓰도록 연결 기본 스키마를 맞춤
+                .withUrlParam("currentSchema", "user_service");
         postgres.start();
         return postgres;
     }

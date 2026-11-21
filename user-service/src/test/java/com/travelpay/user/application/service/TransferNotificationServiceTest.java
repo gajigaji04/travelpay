@@ -11,7 +11,9 @@ import com.travelpay.user.application.service.TransferNotificationMessage.Party;
 import com.travelpay.user.application.service.TransferNotificationService.Outcome;
 import com.travelpay.user.domain.model.entity.TransferNotification;
 import com.travelpay.user.domain.model.entity.User;
+import com.travelpay.user.domain.model.vo.UserNotificationType;
 import com.travelpay.user.domain.repository.TransferNotificationRepository;
+import com.travelpay.user.domain.repository.UserNotificationRepository;
 import com.travelpay.user.domain.repository.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,8 +40,9 @@ class TransferNotificationServiceTest {
     private final TransferNotificationRepository repository = mock(TransferNotificationRepository.class);
     private final TransferNotificationSender sender = mock(TransferNotificationSender.class);
     private final UserRepository userRepository = mock(UserRepository.class);
-    private final TransferNotificationService service = new TransferNotificationService(repository, sender,
-            userRepository, new CallbackOnlyTransactionManager(), Clock.fixed(NOW, ZoneOffset.UTC));
+    private final UserNotificationRepository userNotifications = mock(UserNotificationRepository.class);
+    private final TransferNotificationService service = new TransferNotificationService(repository,
+            userNotifications, sender, userRepository, new CallbackOnlyTransactionManager(), Clock.fixed(NOW, ZoneOffset.UTC));
     private final TransferCompletedEvent event = new TransferCompletedEvent(UUID.randomUUID(), UUID.randomUUID(),
             UUID.randomUUID(), UUID.randomUUID(), 1000, "KRW", Instant.parse("2026-11-20T07:50:41Z"));
 
@@ -59,6 +62,12 @@ class TransferNotificationServiceTest {
         assertEquals(Outcome.RECORDED_ONLY, service.handle(event));
 
         verify(repository).recordIfAbsent(event.eventId(), event.transferId(), 1000, "KRW", event.completedAt(), NOW);
+        // Slack을 보내지 않아도 화면 알림은 보낸 사람·받는 사람 한 행씩 만든다
+        verify(userNotifications).recordIfAbsent(event.eventId(), event.senderId(), UserNotificationType.TRANSFER_SENT,
+                event.transferId(), event.receiverId(), 1000, "KRW", event.completedAt(), NOW);
+        verify(userNotifications).recordIfAbsent(event.eventId(), event.receiverId(),
+                UserNotificationType.TRANSFER_RECEIVED, event.transferId(), event.senderId(), 1000, "KRW",
+                event.completedAt(), NOW);
         verify(sender, never()).send(any());
         assertFalse(notification.isNotified());
     }
