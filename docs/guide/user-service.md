@@ -544,6 +544,22 @@ payment 쪽 [로컬 수동 확인](payment-transfer.md#로컬-수동-확인-2026
 }
 ```
 
+### 로컬 수동 확인 (2026-11-21)
+
+Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 다른 프로젝트가 8080을 써서 `--server.port=18088`. 관리 포트 기본값이 18080이라 18080은 쓸 수 없음), 기존 테스트 회원 두 명이 **Gateway로 로그인**해 1,000 KRW를 송금했습니다. Slack Webhook은 비워 두어 Slack 전송 없이 기록만 했습니다.
+
+| 확인 | 결과 |
+|---|---|
+| V5 마이그레이션 | 기동 시 적용(`now at version v5`) |
+| 받는 사람 `unread-count` | 송금 전 0 → 송금 후 약 1.1초 뒤 1 |
+| 받는 사람 목록 | `TRANSFER_RECEIVED`, `counterpartId` = 보낸 사람, `counterpartName` = 보낸 사람 마스킹 이름, `read: false` |
+| 보낸 사람 목록 | 같은 송금의 `TRANSFER_SENT`, 상대방 = 받는 사람 |
+| 읽음 표시 | CSRF 헤더 없이 403 `COMMON_CSRF_INVALID`, 있으면 200 → 개수 0 |
+| 다른 회원 알림 읽음 | 404 `USER_NOTIFICATION_NOT_FOUND` |
+| 모두 읽음 | `{"updated": 1}` → 개수 0 |
+| 로그인 없이 | 401 `COMMON_UNAUTHORIZED` |
+| DB | `user_notifications` 2행(보낸·받는 사람), `transfer_notifications`는 `notified_at` 비어 있음(Webhook 미설정) |
+
 프런트 권장 사용법: 로그인 상태에서 `unread-count`를 30초마다 부르고 탭이 보이지 않을 때(`document.visibilityState`)는 멈춥니다. 개수가 늘면 목록을 다시 불러오고, 목록을 열거나 항목을 누를 때 읽음 표시를 보냅니다. 401이면 폴링을 멈춥니다.
 
 ## DB 스키마 (Flyway)
