@@ -53,4 +53,18 @@ public interface UserNotificationJpaRepository extends JpaRepository<UserNotific
             where notification.userId = :userId and notification.readAt is null
             """)
     int markAllRead(@Param("userId") UUID userId, @Param("readAt") Instant readAt);
+
+    // JPQL에는 limit·skip locked가 없어 native로 씁니다. 읽음 표시 중인 행은 건너뛰고 다음 주기에 지웁니다.
+    // 조건은 V6 부분 인덱스(ix_user_notifications_read_occurred)와 같게 둡니다.
+    @Modifying
+    @Query(value = """
+            delete from user_notifications
+            where id in (
+                select id from user_notifications
+                where read_at is not null and occurred_at < :cutoff
+                order by occurred_at
+                limit :limit
+                for update skip locked)
+            """, nativeQuery = true)
+    int deleteReadOccurredBefore(@Param("cutoff") Instant cutoff, @Param("limit") int limit);
 }

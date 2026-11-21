@@ -1,8 +1,11 @@
 # 테스트 공통 설정입니다. main의 application.yml 위에 덮어씁니다(classpath:/config/가 우선).
 # Kafka 없이 도는 테스트에서 송금 완료 알림 소비자가 브로커에 붙지 않게 끕니다.
 # 소비자를 확인하는 테스트(TransferCompletedConsumerIntegrationTest)만 Kafka 컨테이너와 함께 켭니다.
+# 알림 보관 기간 정리 스케줄러도 끕니다. 정리 동작은 NotificationRetentionServiceIntegrationTest가 직접 호출해 확인합니다.
 travelpay:
   user:
     transfer-notification:
       consumer-enabled: false
       slack-webhook-url: ""
+    notification-retention:
+      enabled: false

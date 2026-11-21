@@ -20,4 +20,12 @@ public interface TransferNotificationRepository {
 
     /** 알림을 보낼 이벤트를 잠금 조회합니다. 쓰기 트랜잭션 안에서 호출하며 종료 시 잠금을 해제합니다. */
     Optional<TransferNotification> findByEventIdForUpdate(UUID eventId);
+
+    /**
+     * 받은 시각이 cutoff보다 이른 수신 기록을 오래된 것부터 최대 limit개 지웁니다. 알렸는지와 관계없이 지웁니다.
+     * Slack 전송 중이라 잠긴 행은 기다리지 않고 건너뜁니다. 쓰기 트랜잭션 안에서 호출합니다.
+     *
+     * @return 지운 행 수
+     */
+    int deleteReceivedBefore(Instant cutoff, int limit);
 }

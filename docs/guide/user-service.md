@@ -450,7 +450,7 @@ payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.comple
 
 - 행 잠금 안에서 보내므로 같은 이벤트가 동시에 와도 한 번만 보냅니다. 다만 Slack 전송이 성공한 뒤 커밋이 실패하면 재처리에서 한 번 더 보낼 수 있습니다(at-least-once).
 - Slack 호출은 연결 2초·응답 3초에서 포기합니다. 알림 트랜잭션이 DB 연결과 행 잠금을 쥔 채 기다리므로 길게 두지 않습니다.
-- 포기한 이벤트를 자동으로 다시 보내는 스케줄러나 DLT는 없습니다. 미발송 건은 `select * from user_service.transfer_notifications where notified_at is null`로 봅니다.
+- 포기한 이벤트를 자동으로 다시 보내는 스케줄러나 DLT는 없습니다. 미발송 건은 `select * from user_service.transfer_notifications where notified_at is null`로 봅니다. 수신 기록은 받은 지 30일이 지나면 알렸는지와 관계없이 지워지므로([보관 기간 정리](#보관-기간-정리)) 미발송 건도 그 안에 확인합니다.
 
 ### 설정
 
@@ -515,7 +515,7 @@ payment 쪽 [로컬 수동 확인](payment-transfer.md#로컬-수동-확인-2026
 - `counterpartName`은 조회할 때 `users`에서 읽어 마스킹합니다(`홍*동`). 이름은 테이블에 저장하지 않으며, 회원을 찾지 못하면 `null`입니다.
 - 송금 상세는 `transferId`로 payment `GET /api/v1/transfers/{transferId}`를 부릅니다. 받는 사람에게는 `COMPLETED` 송금만 보이므로 알림의 송금은 항상 조회됩니다.
 - 운영은 소비자가 꺼져 있어([설정](#설정)) 화면 알림도 생기지 않습니다. 켜면 토픽에 남은 이벤트로 알림이 한꺼번에 생깁니다.
-- 보관 기간 정리(오래된 알림 삭제)는 없습니다(후속).
+- 읽은 알림은 발생 시각부터 90일이 지나면 지웁니다. 읽지 않은 알림은 기간이 지나도 남깁니다([보관 기간 정리](#보관-기간-정리)).
 
 ### API
 
@@ -562,6 +562,30 @@ Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 
 
 프런트 권장 사용법: 로그인 상태에서 `unread-count`를 30초마다 부르고 탭이 보이지 않을 때(`document.visibilityState`)는 멈춥니다. 개수가 늘면 목록을 다시 불러오고, 목록을 열거나 항목을 누를 때 읽음 표시를 보냅니다. 401이면 폴링을 멈춥니다.
 
+### 보관 기간 정리
+
+`NotificationRetentionScheduler`가 주기마다 `NotificationRetentionService`를 불러 보관 기간이 지난 행을 지웁니다(사용자 결정 2026-11-21).
+
+| 대상 | 기준 열 | 기간 | 조건 |
+|---|---|---|---|
+| 화면 알림 `user_notifications` | `occurred_at`(송금 완료 시각) | 90일 | 읽은 알림(`read_at is not null`)만. 읽지 않은 알림은 남김 |
+| 수신 기록 `transfer_notifications` | `received_at` | 30일 | 알렸는지(`notified_at`)와 관계없이 |
+
+- 기준 시각과 같은 행은 아직 기간 안으로 보고 남깁니다(`<` 비교).
+- 수신 기록은 Slack 중복 거르기에 쓰이므로, 지운 뒤 같은 이벤트가 다시 오면 한 번 더 보낼 수 있습니다. 그래서 토픽 보관 기간(Kafka 기본 7일)보다 길게 두고, 7일 미만 설정은 앱 시작 단계에서 거부합니다. 토픽 보관 기간을 늘리면 이 값도 그보다 길게 바꿉니다.
+- 한 트랜잭션에 `batch-size`행씩, 테이블마다 한 주기 최대 100번까지 지웁니다. 남은 행은 다음 주기에 이어서 지웁니다.
+- 다른 트랜잭션이 잠근 행(읽음 표시 중, Slack 전송 중)은 기다리지 않고 건너뜁니다(`for update skip locked`). 서버가 여러 대면 모두 돌지만 같은 행을 두고 기다리지 않고 결과도 같습니다.
+- 한 주기가 실패해도 에러 로그만 남기고 다음 주기는 돕니다. 지운 행이 있으면 `보관 기간이 지난 알림 정리 readNotifications=… transferEvents=…` 로그를 남깁니다.
+- V6 마이그레이션이 정리용 인덱스(`ix_user_notifications_read_occurred` 읽은 행 부분 인덱스, `ix_transfer_notifications_received`)를 만듭니다.
+
+| 키 | 로컬·운영 | 설명 |
+|---|---|---|
+| `travelpay.user.notification-retention.enabled` | `true` | `false`면 스케줄러를 등록하지 않음(테스트 공통 설정은 `false`) |
+| `travelpay.user.notification-retention.read-notification-retention` | `90d` | 1일 이상 |
+| `travelpay.user.notification-retention.transfer-event-retention` | `30d` | 7일 이상 |
+| `travelpay.user.notification-retention.batch-size` | `1000` | 1~10,000 |
+| `travelpay.user.notification-retention.initial-delay` / `fixed-delay` | `5m` / `1h` | 시작 후 첫 실행, 주기(이전 실행 종료 기준) |
+
 ## DB 스키마 (Flyway)
 
 테이블과 초기 데이터는 `user-service/src/main/resources/db/migration`의 `V번호__설명.sql` 파일로 관리합니다. 앱이 시작할 때 Flyway가 아직 적용하지 않은 파일만 번호 순서대로 실행하고 실행 기록을 `user_service.flyway_schema_history`에 남깁니다. Hibernate는 표를 만들거나 바꾸지 않고 엔티티와 맞는지 검사만 합니다(`ddl-auto: validate`).
@@ -573,6 +597,7 @@ Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 
 | `V3__add_users_session_version.sql` | 회원별 세션 버전 `session_version`(기존 회원은 0) |
 | `V4__create_transfer_notifications.sql` | 송금 완료 이벤트 수신 기록 `transfer_notifications`([송금 완료 알림](#송금-완료-알림-kafka--slack)) |
 | `V5__create_user_notifications.sql` | 회원 화면 알림 `user_notifications`, 유일 `(event_id, user_id)`, 목록·읽지 않은 개수 인덱스([화면 알림](#화면-알림-송금-완료)) |
+| `V6__add_notification_retention_indexes.sql` | 보관 기간 정리용 인덱스: 읽은 화면 알림 `occurred_at` 부분 인덱스, 수신 기록 `received_at`([보관 기간 정리](#보관-기간-정리)) |
 
 - 이미 적용한 파일은 고치지 않습니다. 고치면 앱이 시작할 때 검증에서 멈춥니다. 구조나 데이터를 바꿀 때는 다음 번호의 새 파일을 추가합니다.
 - 엔티티를 바꾸면 같은 작업에서 마이그레이션 파일도 추가합니다. `FlywayMigrationTest`가 마이그레이션 결과를 엔티티 기준 스키마와 비교해 다르면 실패합니다.
@@ -586,9 +611,9 @@ Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 
 ./gradlew :user-service:test
 ```
 
-2026-11-21 기준(송금 완료 알림·화면 알림·일괄 이름 조회, 포크 `feat/353-transfer-kafka`) user-service 전체 78개 클래스 1,014건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Redis·Kafka 포함, `--rerun`, 약 7분 45초).
+2026-11-21 기준(알림 보관 기간 정리 추가, 포크 `feat/transfer-notification-ops`) user-service 전체 81개 클래스 1,027건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Redis·Kafka 포함).
 
-테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다. 소비자 테스트는 이벤트 하나로 화면 알림이 보낸 사람·받는 사람에게 한 행씩 생기는지, 재전달·Slack 실패에도 그대로인지도 봅니다. 화면 알림 조회·읽음은 `UserNotificationServiceIntegrationTest`(PostgreSQL)·`UserNotificationControllerTest`가 확인합니다. DB 테스트 공통 설정(`PostgresJpaTestConfiguration`)은 앱처럼 `currentSchema=user_service`로 연결해 스키마 이름 없는 native SQL도 같은 표를 씁니다.
+테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다. 소비자 테스트는 이벤트 하나로 화면 알림이 보낸 사람·받는 사람에게 한 행씩 생기는지, 재전달·Slack 실패에도 그대로인지도 봅니다. 화면 알림 조회·읽음은 `UserNotificationServiceIntegrationTest`(PostgreSQL)·`UserNotificationControllerTest`가 확인합니다. 보관 기간 정리는 `NotificationRetentionServiceIntegrationTest`(PostgreSQL)가 읽은 오래된 알림·오래된 수신 기록만 지우는지, 배치를 나눠 지우는지, 잠긴 행을 건너뛰었다가 다음 주기에 지우는지 확인합니다. 테스트 공통 설정은 정리 스케줄러도 끕니다. DB 테스트 공통 설정(`PostgresJpaTestConfiguration`)은 앱처럼 `currentSchema=user_service`로 연결해 스키마 이름 없는 native SQL도 같은 표를 씁니다.
 
 비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 관리자 API는 실제 HTTP·PostgreSQL·Redis로 MASTER 권한·CSRF·세션 버전·검색·약관 등록을, 실제 PostgreSQL로 동시 정지·잠금 대기·약관 동시 등록을 확인합니다. 세션 Redis가 꺼진 상태와 메모리가 가득 찬 상태의 health도 확인합니다. API 문서는 실제 HTTP로 그룹·입력칸과 로그인·CSRF 표시가 실제 보안 동작과 같은지, 배포 설정에서 문서 주소가 꺼지는지 확인합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
 
