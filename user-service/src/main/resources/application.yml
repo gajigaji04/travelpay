@@ -57,6 +57,17 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       # 컨슈머 그룹이 처음 붙을 때 그 전에 쌓인 송금 완료 이벤트도 처리합니다.
       auto-offset-reset: earliest
+    # 처리를 포기한 송금 완료 이벤트를 DLT(payment.transfer.completed.DLT)로 보낼 때만 씁니다. 받은 키·값(문자열)을 그대로 보냅니다.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        # Kafka가 꺼져 있을 때 소비자 스레드가 오래 멈추지 않도록 짧게 (payment-service 발행기와 같은 값)
+        delivery.timeout.ms: 5000
+        request.timeout.ms: 3000
+        max.block.ms: 3000
 
 travelpay:
   auth:

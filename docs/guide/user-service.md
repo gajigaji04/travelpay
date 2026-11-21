@@ -440,17 +440,52 @@ payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.comple
 
 `TransferCompletedConsumer`(컨슈머 그룹 `user-transfer-notification`) → `TransferNotificationService`
 
-1. 헤더 `eventId`(UUID)와 값 JSON을 읽습니다. 헤더가 없거나 JSON이 깨졌거나 값이 계약과 다르면(금액 0 이하, 알 수 없는 통화 등) 재시도 없이 ERROR 로그를 남기고 다음 메시지로 넘어갑니다.
+1. 헤더 `eventId`(UUID)와 값 JSON을 읽습니다. 헤더가 없거나 JSON이 깨졌거나 값이 계약과 다르면(금액 0 이하, 알 수 없는 통화 등) 재시도 없이 ERROR 로그를 남기고 [DLT](#송금-완료-알림-dlt)로 보낸 뒤 다음 메시지로 넘어갑니다.
 2. 수신 기록 트랜잭션: `transfer_notifications`에 `insert ... on conflict (event_id) do nothing`. 처음 받은 이벤트만 `notified_at`이 빈 행으로 들어갑니다. 같은 트랜잭션에서 보낸 사람·받는 사람의 [화면 알림](#화면-알림-송금-완료)을 `user_notifications`에 한 행씩 만듭니다(`on conflict (event_id, user_id) do nothing`). 그래서 화면 알림은 Slack 설정·성공 여부와 관계없이 생깁니다.
 3. 알림 트랜잭션: 그 행을 `select ... for update`로 잠근 뒤
    - `notified_at`이 있으면 이미 알린 이벤트(중복 전달)라 끝납니다.
    - Webhook이 설정되지 않았으면 보내지 않고 끝납니다(행은 미발송으로 남음).
    - 아니면 Slack에 보내고, 성공하면 `notified_at`을 남기고 커밋합니다.
-4. Slack 전송이나 DB가 실패하면 알림 트랜잭션만 롤백되고, 1초 간격으로 2번 다시 처리합니다. 그래도 실패하면 ERROR 로그를 남기고 다음 메시지로 넘어갑니다. 수신 기록은 미발송(`notified_at` null)으로 남고, 같은 이벤트가 다시 오면(payment 재발행) 그때 보냅니다.
+4. Slack 전송이나 DB가 실패하면 알림 트랜잭션만 롤백되고, 1초 간격으로 2번 다시 처리합니다. 그래도 실패하면 ERROR 로그를 남기고 [DLT](#송금-완료-알림-dlt)로 보낸 뒤 다음 메시지로 넘어갑니다. 수신 기록은 미발송(`notified_at` null)으로 남고, 같은 이벤트가 다시 오면(DLT 재투입이나 payment 재발행) 그때 보냅니다.
 
 - 행 잠금 안에서 보내므로 같은 이벤트가 동시에 와도 한 번만 보냅니다. 다만 Slack 전송이 성공한 뒤 커밋이 실패하면 재처리에서 한 번 더 보낼 수 있습니다(at-least-once).
 - Slack 호출은 연결 2초·응답 3초에서 포기합니다. 알림 트랜잭션이 DB 연결과 행 잠금을 쥔 채 기다리므로 길게 두지 않습니다.
-- 포기한 이벤트를 자동으로 다시 보내는 스케줄러나 DLT는 없습니다. 미발송 건은 `select * from user_service.transfer_notifications where notified_at is null`로 봅니다. 수신 기록은 받은 지 30일이 지나면 알렸는지와 관계없이 지워지므로([보관 기간 정리](#보관-기간-정리)) 미발송 건도 그 안에 확인합니다.
+- 포기한 이벤트를 자동으로 다시 보내는 스케줄러는 없습니다. DLT에 남은 메시지를 운영자가 확인해 다시 넣습니다. 미발송 건은 `select * from user_service.transfer_notifications where notified_at is null`로도 봅니다. 수신 기록은 받은 지 30일이 지나면 알렸는지와 관계없이 지워지므로([보관 기간 정리](#보관-기간-정리)) 미발송 건도 그 안에 확인합니다.
+
+### 송금 완료 알림 DLT
+
+처리를 포기한 메시지는 `payment.transfer.completed.DLT`로 보냅니다(2026-11-21). 자동으로 다시 처리하지 않고, 지표·경보로 알아챈 뒤 운영자가 확인합니다.
+
+| 항목 | 내용 |
+|---|---|
+| 보내는 경우 | 형식 오류(`InvalidTransferEventException`, 재시도 없이 바로) / Slack·DB 오류 재시도(1초 간격 2번) 소진 |
+| 토픽 | `payment.transfer.completed.DLT`, 파티션 3, 보관 30일. 브로커 자동 생성이 꺼져 있어 소비자가 켜져 있을 때 user-service가 선언합니다(`TransferNotificationKafkaConfig`) |
+| 메시지 | 원본의 키(`transferId`)·값·헤더(`eventId` 포함) 그대로, 원본과 같은 파티션 번호 |
+| 추가 헤더 | `failureKind`(`invalid`·`exhausted`), `failureReason`(이 서비스 예외의 메시지만, 예: `…reason=HTTP 500`). Spring Kafka가 붙이는 `kafka_dlt-original-topic`·`-partition`·`-offset`·`-consumer-group`·`kafka_dlt-exception-fqcn`·`-cause-fqcn` |
+| 남기지 않는 것 | 예외 메시지(`kafka_dlt-exception-message`)·스택(`kafka_dlt-exception-stacktrace`). DB 예외 문구 같은 내부 정보가 담길 수 있어 뺍니다 |
+| 지표 | `transfer_notification_dead_letter_total{kind}` (DLT로 보낸 뒤에만 셈) |
+| 경보 | 로컬 Grafana `송금 완료 알림 DLT 적재`(최근 10분 증가 > 0), 대시보드 **비동기 처리** 행의 `송금 알림 DLT 적재` |
+| DLT 전송 실패 | Kafka 장애로 DLT에 못 보내면 그 메시지를 넘기지 않고 처음부터 다시 처리합니다(잃지 않음). 그동안 같은 파티션의 뒤 메시지는 기다립니다 |
+
+확인 (로컬, Kafka 컨테이너 안):
+
+```bash
+docker exec -it <kafka 컨테이너> /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic payment.transfer.completed.DLT --from-beginning \
+  --property print.key=true --property print.headers=true --property print.offset=true
+```
+
+재투입: 원인을 해결한 뒤(Slack 복구 등) `exhausted` 메시지의 키·값·`eventId` 헤더를 원 토픽에 그대로 넣습니다. 소비자가 `eventId`로 중복을 거르므로 이미 알린 이벤트를 넣어도 다시 보내지 않습니다. `invalid`는 다시 넣어도 같은 이유로 DLT로 돌아오므로 넣지 않고, 발행 쪽(payment) 계약 위반을 확인합니다.
+
+```bash
+# 한 줄 형식: 헤더<TAB>키<TAB>값  (헤더는 eventId:<UUID>)
+docker exec -i <kafka 컨테이너> /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic payment.transfer.completed \
+  --property parse.key=true --property parse.headers=true
+```
+
+- 재투입은 `TransferCompletedConsumerIntegrationTest`에서 DLT 메시지의 키·값·`eventId`를 원 토픽에 다시 넣어 Slack 전송·`notified_at` 기록까지 확인했습니다. 위 콘솔 명령은 로컬에서 직접 해 보지 않았습니다.
+- DLT 메시지를 다 처리해도 DLT에서 지우지 않습니다. 30일 보관 뒤 Kafka가 지웁니다. 어디까지 처리했는지는 오프셋으로 기록해 둡니다.
 
 ### 설정
 
@@ -460,6 +495,7 @@ payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.comple
 | `travelpay.user.transfer-notification.consumer-enabled` | `true` | `false` | 끄면 컨테이너를 시작하지 않고, 이벤트는 토픽에 남아 켤 때 이어서 읽습니다 |
 | `travelpay.user.transfer-notification.concurrency` | `1` | `1` | 토픽 파티션(3)보다 많으면 남는 소비자는 쉽니다 |
 | `travelpay.user.transfer-notification.slack-webhook-url` | `${SLACK_WEBHOOK_URL:}` | 같음 | 비어 있으면 기록만 하고 보내지 않습니다 |
+| `spring.kafka.producer.*` | 문자열 직렬화, `acks=all`·멱등, `delivery.timeout.ms` 5초·`max.block.ms` 3초 | 같음(`application.yml`) | DLT로 보낼 때만 씁니다. Kafka가 멈췄을 때 소비자 스레드가 오래 멈추지 않도록 짧게 둡니다 |
 
 - **Webhook 주소는 비밀값입니다.** 환경 변수 `SLACK_WEBHOOK_URL`로만 넘기고 설정 파일·`.env.example`·문서·커밋에 적지 않습니다. 앱은 주소를 로그·예외 메시지에 남기지 않습니다(전송 실패는 `HTTP 500`이나 예외 종류만 남김).
 - 운영은 payment 발행기와 마찬가지로 운영 Kafka 주소를 인프라와 정할 때까지 꺼 둡니다. 켤 때는 컨슈머 그룹이 처음 붙으므로 토픽에 남은 이벤트를 처음부터 읽습니다(`auto-offset-reset: earliest`).
@@ -611,7 +647,7 @@ Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 
 ./gradlew :user-service:test
 ```
 
-2026-11-21 기준(알림 보관 기간 정리 추가, 포크 `feat/transfer-notification-ops`) user-service 전체 81개 클래스 1,027건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Redis·Kafka 포함).
+2026-11-21 기준(알림 보관 기간 정리·송금 완료 알림 DLT 추가, 포크 `feat/transfer-notification-ops`) user-service 전체 81개 클래스 1,027건이 모두 통과합니다(DLT는 기존 소비자 통합 테스트 2건을 바꿔 확인해 건수는 같음, `--rerun`)(실패·건너뜀 0, Testcontainers PostgreSQL·Redis·Kafka 포함).
 
 테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다. 소비자 테스트는 이벤트 하나로 화면 알림이 보낸 사람·받는 사람에게 한 행씩 생기는지, 재전달·Slack 실패에도 그대로인지도 봅니다. 화면 알림 조회·읽음은 `UserNotificationServiceIntegrationTest`(PostgreSQL)·`UserNotificationControllerTest`가 확인합니다. 보관 기간 정리는 `NotificationRetentionServiceIntegrationTest`(PostgreSQL)가 읽은 오래된 알림·오래된 수신 기록만 지우는지, 배치를 나눠 지우는지, 잠긴 행을 건너뛰었다가 다음 주기에 지우는지 확인합니다. 테스트 공통 설정은 정리 스케줄러도 끕니다. DB 테스트 공통 설정(`PostgresJpaTestConfiguration`)은 앱처럼 `currentSchema=user_service`로 연결해 스키마 이름 없는 native SQL도 같은 표를 씁니다.
 

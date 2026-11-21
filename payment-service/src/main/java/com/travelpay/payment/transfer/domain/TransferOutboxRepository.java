@@ -1,9 +1,11 @@
 package com.travelpay.payment.transfer.domain;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
 public interface TransferOutboxRepository extends JpaRepository<TransferOutbox, UUID> {
@@ -21,4 +23,30 @@ public interface TransferOutboxRepository extends JpaRepository<TransferOutbox, 
             for update skip locked
             """)
     List<TransferOutbox> findPendingForUpdate(int limit);
+
+    /** 미발행(PENDING) 건수입니다(지표용, 부분 인덱스 ix_transfer_outbox_pending 사용). */
+    @Query("select count(o) from TransferOutbox o "
+            + "where o.status = com.travelpay.payment.transfer.domain.TransferOutboxStatus.PENDING")
+    long countPending();
+
+    /** 가장 오래된 미발행(PENDING) 건의 생성 시각입니다. 없으면 null입니다(지표용). */
+    @Query("select min(o.createdAt) from TransferOutbox o "
+            + "where o.status = com.travelpay.payment.transfer.domain.TransferOutboxStatus.PENDING")
+    Instant findOldestPendingCreatedAt();
+
+    /**
+     * 발행한 지 오래된(PUBLISHED, published_at &lt; cutoff) 건을 최대 limit건 지우고 지운 행 수를 반환합니다.
+     * 다른 트랜잭션이 잡고 있는 행은 건너뜁니다(SKIP LOCKED). PENDING은 지우지 않습니다.
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(nativeQuery = true, value = """
+            delete from transfer_outbox
+            where id in (
+                select id from transfer_outbox
+                where status = 'PUBLISHED' and published_at < :cutoff
+                order by published_at
+                limit :limit
+                for update skip locked)
+            """)
+    int deletePublishedBefore(Instant cutoff, int limit);
 }
