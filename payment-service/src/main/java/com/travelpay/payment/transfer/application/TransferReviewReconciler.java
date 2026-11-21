@@ -30,6 +30,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  *     <li>항목 불일치·원장 조회 실패 → 그대로 둠</li>
  * </ul>
  * 원장 조회는 DB 트랜잭션 밖에서 하고, MANUAL_REVIEW일 때만 바꾸는 조건부 UPDATE와 SYSTEM 이력 저장을 한 트랜잭션으로 묶습니다.
+ * COMPLETED로 확정하면 같은 트랜잭션에서 완료 이벤트도 Outbox에 기록합니다({@link TransferCompletedOutboxWriter}).
  * 운영자 확정·다른 인스턴스와 겹쳐도 조건부 UPDATE에서 한쪽만 반영됩니다.
  * 복구와 달리 선점하지 않으므로 서버가 여러 대면 같은 송금을 서버마다 원장에 조회할 수 있습니다. 조회는 상태를 바꾸지 않고
  * 양이 적어(서버당 1분 10건 이하) 그대로 두며, 원장 호출 동안 DB 잠금을 잡지 않으려는 것이기도 합니다.
@@ -55,6 +56,7 @@ public class TransferReviewReconciler {
     private final TransferRepository transferRepository;
     private final TransferStatusHistoryRepository historyRepository;
     private final TransferLedgerReader ledgerReader;
+    private final TransferCompletedOutboxWriter completedOutboxWriter;
     private final TransactionTemplate transactionTemplate;
     private final MeterRegistry meterRegistry;
 
@@ -65,11 +67,13 @@ public class TransferReviewReconciler {
     public TransferReviewReconciler(TransferRepository transferRepository,
             TransferStatusHistoryRepository historyRepository,
             TransferLedgerReader ledgerReader,
+            TransferCompletedOutboxWriter completedOutboxWriter,
             PlatformTransactionManager transactionManager,
             MeterRegistry meterRegistry) {
         this.transferRepository = transferRepository;
         this.historyRepository = historyRepository;
         this.ledgerReader = ledgerReader;
+        this.completedOutboxWriter = completedOutboxWriter;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.meterRegistry = meterRegistry;
     }
@@ -135,6 +139,9 @@ public class TransferReviewReconciler {
             }
             historyRepository.save(TransferStatusHistory.bySystem(transfer.getId(), TransferStatus.MANUAL_REVIEW, target,
                     REASON, ledgerTransactionId, now));
+            if (target == TransferStatus.COMPLETED) {
+                completedOutboxWriter.record(transfer, now);
+            }
             return true;
         });
         if (!Boolean.TRUE.equals(applied)) {

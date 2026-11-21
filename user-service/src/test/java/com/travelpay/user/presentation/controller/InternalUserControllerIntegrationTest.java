@@ -11,6 +11,7 @@ import com.travelpay.common.auth.AuthHeaders;
 import com.travelpay.common.auth.AuthRole;
 import com.travelpay.common.config.CommonWebAutoConfiguration;
 import com.travelpay.user.application.service.CurrentMemberService;
+import com.travelpay.user.application.service.UserDisplayNameService;
 import com.travelpay.user.application.service.UserRealNameService;
 import com.travelpay.user.common.config.JpaAuditingConfiguration;
 import com.travelpay.user.common.security.SecurityConfiguration;
@@ -75,7 +76,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
         SecurityConfiguration.class, RestAuthenticationEntryPoint.class, RestAccessDeniedHandler.class,
         SecurityErrorResponseWriter.class, JpaAuditingConfiguration.class,
         PostgresJpaTestConfiguration.class, JpaRepositoryTestConfiguration.class,
-        CurrentMemberService.class, UserRealNameService.class, InternalUserController.class,
+        CurrentMemberService.class, UserRealNameService.class, UserDisplayNameService.class, InternalUserController.class,
         RedisRecipientLookupLimiter.class,
         InternalUserControllerIntegrationTest.WebTestConfiguration.class
 })
@@ -285,6 +286,64 @@ class InternalUserControllerIntegrationTest {
         assertError(mvc.perform(request).andReturn(), 403, "COMMON_FORBIDDEN");
     }
 
+    @Test
+    void displayNamesAreMaskedForAnyStatusAndMissingMembersAreLeftOut() throws Exception {
+        var activeId = saveMember(UserStatus.ACTIVE);
+        var closedId = saveMember("남궁민수", "010-1800-0003", UserStatus.CLOSED);
+        var missingId = UUID.randomUUID();
+
+        var result = mvc.perform(displayNamesRequest(activeId + "," + closedId + "," + missingId + "," + activeId))
+                .andReturn();
+
+        assertEquals(200, result.getResponse().getStatus());
+        var text = result.getResponse().getContentAsString(UTF_8);
+        var data = mapper.readTree(text).get("data");
+        assertEquals(2, data.size());
+        var names = new java.util.HashMap<String, String>();
+        data.forEach(item -> {
+            assertEquals(2, item.size(), "회원 ID와 마스킹 이름 외의 값은 내보내지 않습니다");
+            names.put(item.get("userId").asString(), item.get("maskedName").asString());
+        });
+        assertEquals("홍*동", names.get(activeId.toString()));
+        assertEquals("남**수", names.get(closedId.toString()));
+        assertFalse(text.contains("홍길동"));
+        assertFalse(text.contains("남궁민수"));
+        assertNull(result.getRequest().getSession(false));
+    }
+
+    @Test
+    void displayNamesDoNotUseTheRecipientLookupAllowance() throws Exception {
+        var userId = saveMember(UserStatus.ACTIVE);
+        for (int i = 0; i < 61; i++) {
+            assertEquals(200, mvc.perform(displayNamesRequest(userId.toString())).andReturn().getResponse().getStatus());
+        }
+        assertEquals(200, mvc.perform(recipientRequest(userId)).andReturn().getResponse().getStatus());
+    }
+
+    @Test
+    void displayNamesWithoutRequesterHeadersAreUnauthorized() throws Exception {
+        var request = get("/internal/v1/users/display-names").param("ids", saveMember(UserStatus.ACTIVE).toString());
+
+        assertRequesterRejected(mvc.perform(request).andReturn());
+    }
+
+    @Test
+    void displayNamesNeedOneToOneHundredIds() throws Exception {
+        var hundredOne = String.join(",", Stream.generate(() -> UUID.randomUUID().toString()).limit(101).toList());
+        var hundred = String.join(",", Stream.generate(() -> UUID.randomUUID().toString()).limit(100).toList());
+
+        assertError(mvc.perform(displayNamesRequest(hundredOne)).andReturn(), 400, "COMMON_INVALID_REQUEST");
+        assertError(mvc.perform(displayNamesRequest("")).andReturn(), 400, "COMMON_INVALID_REQUEST");
+        assertError(mvc.perform(displayNamesRequest("not-a-uuid")).andReturn(), 400, "COMMON_INVALID_REQUEST");
+        assertEquals(200, mvc.perform(displayNamesRequest(hundred)).andReturn().getResponse().getStatus());
+    }
+
+    private MockHttpServletRequestBuilder displayNamesRequest(String ids) {
+        return get("/internal/v1/users/display-names").param("ids", ids)
+                .header(AuthHeaders.USER_ID, requesterId.toString())
+                .header(AuthHeaders.USER_ROLE, "USER");
+    }
+
     private static Stream<Arguments> invalidRequesterHeaders() {
         var id = "550e8400-e29b-41d4-a716-446655440000";
         return Stream.of(
@@ -323,8 +382,12 @@ class InternalUserControllerIntegrationTest {
     }
 
     private UUID saveMember(UserStatus state) {
+        return saveMember("홍길동", "010-1800-0001", state);
+    }
+
+    private UUID saveMember(String realName, String phone, UserStatus state) {
         var userId = transactions.execute(status -> {
-            var user = User.register("홍길동", "010-1800-0001", AT);
+            var user = User.register(realName, phone, AT);
             entityManager.persist(user);
             return user.getId();
         });

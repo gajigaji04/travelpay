@@ -120,6 +120,31 @@ class UserConfigurationFilesTest {
         assertNull(environment.getProperty("spring.flyway.url"));
     }
 
+    // 운영 Kafka 설정을 정하기 전이라 운영에서는 송금 완료 알림 소비자를 시작하지 않음(payment 발행기도 운영에서 꺼짐)
+    @Test
+    void theTransferNotificationConsumerRunsLocallyButNotInProd() throws IOException {
+        assertEquals(true, transferNotification(environment("application.yml")).consumerEnabled());
+        assertEquals(false, transferNotification(environment("application-prod.yml")).consumerEnabled());
+    }
+
+    // Webhook 주소는 비밀값이라 설정 파일에 두지 않고 환경 변수로만 받으며, 없으면 보내지 않음
+    @ParameterizedTest
+    @ValueSource(strings = {"application.yml", "application-prod.yml"})
+    void theSlackWebhookComesOnlyFromTheEnvironment(String filename) throws IOException {
+        assertEquals(false, transferNotification(environment(filename)).slackConfigured());
+
+        var configured = transferNotification(environment(filename)
+                .withProperty("SLACK_WEBHOOK_URL", "https://hooks.example.test/services/T/B/x"));
+
+        assertEquals("https://hooks.example.test/services/T/B/x", configured.slackWebhookUrl());
+        assertEquals(false, configured.toString().contains("hooks.example.test"));
+    }
+
+    private static TransferNotificationProperties transferNotification(MockEnvironment environment) {
+        return Binder.get(environment)
+                .bind("travelpay.user.transfer-notification", TransferNotificationProperties.class).get();
+    }
+
     private static ServerProperties serverProperties(String filename) throws IOException {
         return Binder.get(environment(filename)).bindOrCreate("server", ServerProperties.class);
     }

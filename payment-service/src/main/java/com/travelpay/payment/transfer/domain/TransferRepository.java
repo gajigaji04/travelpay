@@ -33,7 +33,8 @@ public interface TransferRepository extends JpaRepository<Transfer, UUID>, JpaSp
     /**
      * 처리 중(PROCESSING) 송금만 처리 결과 상태로 바꾸고 변경된 행 수(0 또는 1)를 반환합니다.
      * 실패 사유는 FAILED일 때만 넣고 그 외에는 null입니다(ck_transfer_failure_reason).
-     * 같은 송금의 재요청이 동시에 결과를 반영해도 한 번만 바뀌며, 원장 호출 후 짧게 실행되도록 자체 트랜잭션으로 커밋합니다.
+     * 같은 송금의 재요청이 동시에 결과를 반영해도 한 번만 바뀝니다.
+     * 호출하는 쪽(TransferService)이 완료 이벤트(Outbox) 기록과 한 트랜잭션으로 묶어 부르며, 이 메소드의 트랜잭션은 거기에 참여합니다.
      */
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)

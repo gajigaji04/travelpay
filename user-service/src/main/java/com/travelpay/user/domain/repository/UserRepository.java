@@ -16,6 +16,9 @@ public interface UserRepository {
     /** 회원 ID로 조회하며, 존재하지 않으면 빈 결과를 반환합니다. */
     Optional<User> findById(UUID userId);
 
+    /** 회원 ID들로 상태와 관계없이 조회합니다. 없는 ID는 결과에서 빠지며 순서는 보장하지 않습니다. */
+    List<User> findAllById(Collection<UUID> userIds);
+
     /** 마이페이지 정보를 회원과 로그인 이메일까지 한 번에 조회하며, 회원이 없으면 빈 결과를 반환합니다. */
     Optional<UserProfile> findProfile(UUID userId);
 

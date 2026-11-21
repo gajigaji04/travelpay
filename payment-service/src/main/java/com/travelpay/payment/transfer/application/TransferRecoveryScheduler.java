@@ -20,7 +20,7 @@ import org.springframework.scheduling.annotation.Scheduled;
  * 서버가 여러 대면 모두 돌지만, 복구 대상은 SKIP LOCKED로 선점해 서버끼리 서로 다른 송금을 나눠 처리합니다
  * ({@link TransferService#recoverDue}). 분산 락은 쓰지 않습니다.
  * 6주기(약 1분)마다 MANUAL_REVIEW 송금을 원장 결과로 자동 대사합니다({@link TransferReviewReconciler}).
- * 결제 정산 복구와 스레드를 나눈 풀(2개)을 늘리지 않도록 같은 스레드에서 복구 뒤에 실행합니다.
+ * 스케줄러 풀(결제 정산 복구·송금 복구·송금 Outbox 발행 3개)을 늘리지 않도록 같은 스레드에서 복구 뒤에 실행합니다.
  * transfer.recovery.enabled=false이면 돌지 않습니다. (테스트·수동 확인용)
  */
 @Configuration(proxyBeanMethods = false)

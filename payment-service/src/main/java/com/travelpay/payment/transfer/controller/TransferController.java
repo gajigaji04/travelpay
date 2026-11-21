@@ -9,6 +9,7 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.common.response.PageResponse;
+import com.travelpay.payment.transfer.application.TransferCounterpartNames;
 import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.domain.TransferDirection;
 import com.travelpay.payment.transfer.domain.TransferStatus;
@@ -44,9 +45,11 @@ public class TransferController {
     public static final String IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
 
     private final TransferService transferService;
+    private final TransferCounterpartNames counterpartNames;
 
-    public TransferController(TransferService transferService) {
+    public TransferController(TransferService transferService, TransferCounterpartNames counterpartNames) {
         this.transferService = transferService;
+        this.counterpartNames = counterpartNames;
     }
 
     /**
@@ -100,7 +103,8 @@ public class TransferController {
             @RequestHeader(name = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey,
             @Valid @RequestBody TransferCreateRequest request
     ) {
-        TransferResponse response = transferService.request(requireTransferUser(user), idempotencyKey, request);
+        TransferResponse response = counterpartNames.fill(
+                transferService.request(requireTransferUser(user), idempotencyKey, request));
         boolean unsettled = response.status() == TransferStatus.PROCESSING
                 || response.status() == TransferStatus.MANUAL_REVIEW;
         HttpStatus status = unsettled ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
@@ -125,7 +129,7 @@ public class TransferController {
             @CurrentUser AuthenticatedUser user,
             @Parameter(description = "송금 ID") @PathVariable UUID transferId
     ) {
-        return ApiResponse.success(transferService.get(requireTransferUser(user), transferId));
+        return ApiResponse.success(counterpartNames.fill(transferService.get(requireTransferUser(user), transferId)));
     }
 
     /** 송금 전 수취인 확인용이며, 마스킹한 이름과 송금 가능 여부만 반환합니다. */
@@ -183,7 +187,8 @@ public class TransferController {
             @Parameter(description = "페이지 크기(기본 20, 100을 넘으면 100으로 조회)")
             @RequestParam(defaultValue = "20") @Min(1) int size
     ) {
-        return ApiResponse.success(transferService.list(requireTransferUser(user), direction, page, size));
+        return ApiResponse.success(counterpartNames.fill(
+                transferService.list(requireTransferUser(user), direction, page, size)));
     }
 
     /** 사용자 송금 API는 회원(USER)만 씁니다. 관리자 송금 API(/api/v1/admin/transfers)는 별도로 MASTER만 허용합니다. */

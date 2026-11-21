@@ -50,6 +50,11 @@ public class UserRepositoryImpl implements UserRepository {
     }
 
     @Override
+    public List<User> findAllById(Collection<UUID> userIds) {
+        return userJpaRepository.findAllById(userIds);
+    }
+
+    @Override
     public Optional<UserProfile> findProfile(UUID userId) {
         return userJpaRepository.findProfile(userId);
     }

@@ -31,6 +31,7 @@ import com.travelpay.payment.infra.client.user.UserFeignApi;
 import com.travelpay.payment.infra.client.wallet.WalletFeignApi;
 import com.travelpay.payment.support.PostgresContainerSupport;
 import com.travelpay.payment.transfer.application.TransferAdminService;
+import com.travelpay.payment.transfer.application.TransferCompletedOutboxWriter;
 import com.travelpay.payment.transfer.application.TransferReviewReconciler;
 import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.client.TransferLedgerReader;
@@ -116,6 +117,9 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
     private TransferLedgerReader ledgerReader;
 
     @Autowired
+    private TransferCompletedOutboxWriter completedOutboxWriter;
+
+    @Autowired
     private PlatformTransactionManager transactionManager;
 
     @MockitoBean
@@ -140,6 +144,9 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
     @AfterEach
     void cleanUp() {
         for (UUID user : users) {
+            jdbcTemplate.update("""
+                    delete from transfer_outbox
+                    where transfer_id in (select id from transfer where sender_id = ? or receiver_id = ?)""", user, user);
             jdbcTemplate.update("""
                     delete from transfer_status_history
                     where transfer_id in (select id from transfer where sender_id = ? or receiver_id = ?)""", user, user);
@@ -387,7 +394,8 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
         SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
         List<Object> results = runConcurrently(2, i -> new TransferReviewReconciler(transferRepository,
-                historyRepository, ledgerReader, transactionManager, meterRegistry).reconcile(Instant.now(), 10));
+                historyRepository, ledgerReader, completedOutboxWriter, transactionManager, meterRegistry)
+                .reconcile(Instant.now(), 10));
 
         assertEquals(1, results.stream().mapToInt(Integer.class::cast).sum());
         verify(ledgerFeignApi, times(2)).getTransaction("TRANSFER", transferId);

@@ -50,6 +50,13 @@ spring:
     data:
       redis:
         namespace: travelpay:user:session
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # 컨슈머 그룹이 처음 붙을 때 그 전에 쌓인 송금 완료 이벤트도 처리합니다.
+      auto-offset-reset: earliest
 
 travelpay:
   auth:
@@ -79,6 +86,12 @@ travelpay:
       # 수취인 조회 제한의 요청자별 허용 횟수와 집계 기간입니다.
       limit: ${USER_RECIPIENT_LOOKUP_LIMIT:60}
       period: ${USER_RECIPIENT_LOOKUP_PERIOD:60s}
+    transfer-notification:
+      # payment.transfer.completed 소비자(송금 완료 → Slack 알림). 끄면 이벤트는 토픽에 남고 켤 때 이어서 읽습니다.
+      consumer-enabled: true
+      concurrency: 1
+      # Slack Incoming Webhook 주소(비밀값, 환경 변수로만). 비어 있으면 수신 기록만 하고 보내지 않습니다.
+      slack-webhook-url: ${SLACK_WEBHOOK_URL:}
 
 server:
   port: 8081

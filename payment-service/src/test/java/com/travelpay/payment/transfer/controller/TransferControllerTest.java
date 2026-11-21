@@ -13,7 +13,9 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.GlobalExceptionHandler;
 import com.travelpay.common.response.PageResponse;
+import com.travelpay.payment.transfer.application.TransferCounterpartNames;
 import com.travelpay.payment.transfer.application.TransferService;
+import com.travelpay.payment.transfer.client.TransferUserReader;
 import com.travelpay.payment.transfer.domain.TransferDirection;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
 import com.travelpay.payment.transfer.domain.TransferStatus;
@@ -48,10 +50,13 @@ class TransferControllerTest {
             """;
 
     private TransferService transferService;
+    private TransferUserReader userReader;
 
     @BeforeEach
     void setUp() {
         transferService = mock(TransferService.class);
+        userReader = mock(TransferUserReader.class);
+        when(userReader.findDisplayNames(any())).thenReturn(java.util.Map.of());
     }
 
     @Test
@@ -60,7 +65,7 @@ class TransferControllerTest {
         when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
                 .thenReturn(new TransferResponse(transferId, TransferDirection.SENT, SENDER.userId(), RECEIVER_ID,
                         10_000L, "KRW", TransferStatus.COMPLETED, null, "저녁값",
-                        Instant.parse("2026-10-28T01:02:03.123456Z")));
+                        Instant.parse("2026-10-28T01:02:03.123456Z"), null));
 
         mvc(SENDER).perform(post("/api/v1/transfers")
                         .header(TransferController.IDEMPOTENCY_KEY_HEADER, "key-1")
@@ -235,19 +240,35 @@ class TransferControllerTest {
     void listsTransfersWithCommonPageResponse() throws Exception {
         UUID transferId = UUID.randomUUID();
         var item = new TransferResponse(transferId, TransferDirection.RECEIVED, RECEIVER_ID, SENDER.userId(),
-                10_000L, "KRW", TransferStatus.COMPLETED, null, null, Instant.parse("2026-10-28T01:02:03Z"));
+                10_000L, "KRW", TransferStatus.COMPLETED, null, null, Instant.parse("2026-10-28T01:02:03Z"), null);
         when(transferService.list(SENDER.userId(), TransferDirection.RECEIVED, 0, 20))
                 .thenReturn(new PageResponse<>(List.of(item), 0, 20, 1, 1));
+        // 받은 송금의 상대방은 송금인(RECEIVER_ID 자리)이다
+        when(userReader.findDisplayNames(java.util.Set.of(RECEIVER_ID))).thenReturn(java.util.Map.of(RECEIVER_ID, "김*수"));
 
         mvc(SENDER).perform(get("/api/v1/transfers").param("direction", "RECEIVED"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.success").value(true))
                 .andExpect(jsonPath("$.data.items[0].transferId").value(transferId.toString()))
                 .andExpect(jsonPath("$.data.items[0].direction").value("RECEIVED"))
+                .andExpect(jsonPath("$.data.items[0].counterpartName").value("김*수"))
                 .andExpect(jsonPath("$.data.page").value(0))
                 .andExpect(jsonPath("$.data.size").value(20))
                 .andExpect(jsonPath("$.data.totalElements").value(1))
                 .andExpect(jsonPath("$.data.totalPages").value(1));
+    }
+
+    @Test
+    void detailHasNullCounterpartNameWhenNamesAreUnavailable() throws Exception {
+        UUID transferId = UUID.randomUUID();
+        when(transferService.get(SENDER.userId(), transferId)).thenReturn(new TransferResponse(transferId,
+                TransferDirection.SENT, SENDER.userId(), RECEIVER_ID, 10_000L, "KRW", TransferStatus.COMPLETED, null,
+                null, Instant.parse("2026-10-28T01:02:03Z"), null));
+
+        mvc(SENDER).perform(get("/api/v1/transfers/{id}", transferId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.receiverId").value(RECEIVER_ID.toString()))
+                .andExpect(jsonPath("$.data.counterpartName").doesNotExist());
     }
 
     @Test
@@ -261,7 +282,7 @@ class TransferControllerTest {
     private void givenTransferResult(TransferStatus status) {
         when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
                 .thenReturn(new TransferResponse(UUID.randomUUID(), TransferDirection.SENT, SENDER.userId(),
-                        RECEIVER_ID, 10_000L, "KRW", status, null, "저녁값", Instant.parse("2026-10-30T01:02:03Z")));
+                        RECEIVER_ID, 10_000L, "KRW", status, null, "저녁값", Instant.parse("2026-10-30T01:02:03Z"), null));
     }
 
     private ResultActions postTransfer() throws Exception {
@@ -273,7 +294,7 @@ class TransferControllerTest {
 
     private MockMvc mvc(AuthenticatedUser user) {
         CurrentUserProvider provider = () -> Optional.ofNullable(user);
-        return MockMvcBuilders.standaloneSetup(new TransferController(transferService))
+        return MockMvcBuilders.standaloneSetup(new TransferController(transferService, new TransferCounterpartNames(userReader)))
                 .setCustomArgumentResolvers(new CurrentUserArgumentResolver(provider))
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .build();

@@ -1,5 +1,6 @@
 package com.travelpay.user.presentation.controller;
 
+import java.util.List;
 import java.util.UUID;
 
 import com.travelpay.common.auth.AuthenticatedUser;
@@ -7,12 +8,15 @@ import com.travelpay.common.auth.web.CurrentUserHeaderParser;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.user.application.service.UserDisplayNameService;
 import com.travelpay.user.application.service.UserRealNameService;
+import com.travelpay.user.presentation.dto.UserDisplayNameResponse;
 import com.travelpay.user.presentation.dto.UserRealNameResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -24,6 +28,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class InternalUserController {
 
     private final UserRealNameService userRealNameService;
+    private final UserDisplayNameService userDisplayNameService;
 
     /** 송금 수취인 실명 조회: 요청자 회원 헤더를 검사한 뒤 경로의 수취인을 조회합니다. */
     @GetMapping("/internal/v1/users/{userId}/real-name")
@@ -41,6 +46,19 @@ public class InternalUserController {
         var requester = requireRequester(request);
         return ApiResponse.success(UserRealNameResponse.from(
                 userRealNameService.getFundingIdentity(requester.userId(), userId)));
+    }
+
+    /**
+     * 송금 내역 상대방 이름 일괄 조회: 마스킹한 이름만 반환합니다. ids는 쉼표로 구분한 회원 ID 1~100개이며,
+     * 없는 회원은 응답에서 빠집니다.
+     */
+    @GetMapping("/internal/v1/users/display-names")
+    public ApiResponse<List<UserDisplayNameResponse>> getDisplayNames(
+            @RequestParam("ids") List<UUID> userIds, HttpServletRequest request) {
+        var requester = requireRequester(request);
+        return ApiResponse.success(userDisplayNameService.getDisplayNames(requester.userId(), userIds).stream()
+                .map(UserDisplayNameResponse::from)
+                .toList());
     }
 
     private static AuthenticatedUser requireRequester(HttpServletRequest request) {

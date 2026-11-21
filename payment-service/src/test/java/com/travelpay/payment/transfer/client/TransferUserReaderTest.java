@@ -195,4 +195,31 @@ class TransferUserReaderTest {
         }
         return FeignException.errorStatus("UserFeignApi#getActiveUser(UUID)", builder.build());
     }
+
+    @Test
+    void displayNamesKeepOnlyRequestedMembersWithANameAndSkipEmptyInput() {
+        var stranger = UUID.randomUUID();
+        when(userFeignApi.getDisplayNames(org.mockito.ArgumentMatchers.anyList())).thenReturn(ApiResponse.success(java.util.List.of(
+                new UserFeignApi.DisplayNameResponse(USER_ID, "홍*동"),
+                new UserFeignApi.DisplayNameResponse(OTHER_USER_ID, " "),
+                new UserFeignApi.DisplayNameResponse(stranger, "남*수"))));
+
+        assertEquals(Map.of(USER_ID, "홍*동"), userReader.findDisplayNames(java.util.List.of(USER_ID, OTHER_USER_ID)));
+        assertEquals(Map.of(), userReader.findDisplayNames(java.util.List.of()));
+        org.mockito.Mockito.verify(userFeignApi, org.mockito.Mockito.times(1))
+                .getDisplayNames(org.mockito.ArgumentMatchers.anyList());
+    }
+
+    @Test
+    void displayNameFailuresBecomeAnEmptyResultInsteadOfAnError() {
+        when(userFeignApi.getDisplayNames(org.mockito.ArgumentMatchers.anyList()))
+                .thenThrow(feignError(500, ""))
+                .thenThrow(new RetryableException(-1, "timeout", Request.HttpMethod.GET,
+                        new SocketTimeoutException("Read timed out"), (Long) null, request()))
+                .thenReturn(null);
+
+        for (int i = 0; i < 3; i++) {
+            assertEquals(Map.of(), userReader.findDisplayNames(java.util.List.of(USER_ID)));
+        }
+    }
 }

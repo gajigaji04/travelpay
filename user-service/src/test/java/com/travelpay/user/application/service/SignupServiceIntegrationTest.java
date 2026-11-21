@@ -488,6 +488,7 @@ class SignupServiceIntegrationTest {
             return new UserRepository() {
                 @Override public User save(User user) { return delegate.save(user); }
                 @Override public Optional<User> findById(UUID id) { return delegate.findById(id); }
+                @Override public List<User> findAllById(Collection<UUID> userIds) { return delegate.findAllById(userIds); }
                 @Override public Optional<UserProfile> findProfile(UUID id) { return delegate.findProfile(id); }
                 @Override public boolean existsByPhone(String phone) {
                     var exists = delegate.existsByPhone(phone);

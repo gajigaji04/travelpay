@@ -37,7 +37,9 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * 송금 요청과 조회를 처리합니다.
@@ -46,6 +48,7 @@ import org.springframework.transaction.annotation.Transactional;
  * 다시 요청합니다. 원장이 요청을 받아들이지 않거나(409·400 등) 결과 모름이 한도에 이르면 자동 처리를 멈추고 MANUAL_REVIEW로 둡니다.
  * 같은 Idempotency-Key 재요청은 원장을 다시 호출하지 않고 현재 상태로 응답합니다.
  * 잔액 검증·변경과 같은 reference의 중복 처리 방지는 원장이 보장합니다.
+ * COMPLETED로 바꿀 때는 같은 트랜잭션에서 완료 이벤트를 Outbox에 기록합니다({@link TransferCompletedOutboxWriter}).
  */
 @Service
 public class TransferService {
@@ -71,17 +74,23 @@ public class TransferService {
     private final TransferWalletReader walletReader;
     private final TransferUserReader userReader;
     private final TransferLedgerClient ledgerClient;
+    private final TransferCompletedOutboxWriter completedOutboxWriter;
+    private final TransactionTemplate transactionTemplate;
 
     public TransferService(
             TransferRepository transferRepository,
             TransferWalletReader walletReader,
             TransferUserReader userReader,
-            TransferLedgerClient ledgerClient
+            TransferLedgerClient ledgerClient,
+            TransferCompletedOutboxWriter completedOutboxWriter,
+            PlatformTransactionManager transactionManager
     ) {
         this.transferRepository = transferRepository;
         this.walletReader = walletReader;
         this.userReader = userReader;
         this.ledgerClient = ledgerClient;
+        this.completedOutboxWriter = completedOutboxWriter;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     /**
@@ -366,8 +375,17 @@ public class TransferService {
         }
         TransferStatus finished = failureReason == null ? TransferStatus.COMPLETED : TransferStatus.FAILED;
         try {
-            // 다른 곳에서 먼저 반영했으면 0행이 바뀌며, 호출한 쪽은 다시 읽은 상태를 따릅니다.
-            transferRepository.finishProcessing(transfer.getId(), finished, failureReason, now());
+            // 상태 변경과 완료 이벤트(Outbox) 기록을 한 트랜잭션으로 묶습니다. 이벤트 기록이 실패하면 상태 변경도 롤백되어
+            // PROCESSING으로 남고, 아래 catch에서 결과 모름이 되어 복구가 다시 반영합니다.
+            Instant finishedAt = now();
+            transactionTemplate.executeWithoutResult(status -> {
+                // 다른 곳에서 먼저 반영했으면 0행이 바뀌며, 호출한 쪽은 다시 읽은 상태를 따릅니다.
+                int updated = transferRepository.finishProcessing(transfer.getId(), finished, failureReason, finishedAt);
+                // 실제로 이 호출이 COMPLETED로 바꿨을 때만 기록해, 재전송·동시 반영에도 이벤트는 한 건입니다.
+                if (updated == 1 && finished == TransferStatus.COMPLETED) {
+                    completedOutboxWriter.record(transfer, finishedAt);
+                }
+            });
             return Outcome.SETTLED;
         } catch (RuntimeException exception) {
             // 원장 처리 결과는 확정됐지만 반영하지 못했으므로 결과 모름으로 두고, 복구의 재전송(원장 멱등)으로 반영합니다.
