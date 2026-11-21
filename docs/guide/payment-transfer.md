@@ -35,7 +35,7 @@
    - `PAYMENT_DB_URL`이 비어 있으면 `'url' must start with "jdbc"`로 시작을 멈춥니다. `.env`를 불러오지 않은 터미널에서 실행한 경우입니다.
    - Eureka 대신 원장·회원 서비스를 직접 주소로 부를 때는 `LEDGER_SERVICE_URL`·`USER_SERVICE_URL`을 지정합니다(예: `http://localhost:8085`). 비우면 Eureka에서 찾습니다.
    - 배포 설정(`application-prod.yml`)은 `SPRING_CONFIG_NAME=application-prod`로 선택합니다.
-   - 송금 완료 이벤트를 발행하려면 Kafka가 필요합니다(`docker compose up -d kafka`, 기본 `localhost:9092`, `KAFKA_BOOTSTRAP_SERVERS`로 변경). Kafka가 없어도 송금 처리 자체는 Kafka를 부르지 않지만, 토픽 선언과 발행이 실패해 기동이 느려지고 실패 로그가 주기마다 남을 수 있습니다(Kafka 없는 로컬 기동은 2026-11-15 기준 직접 확인하지 않음). Kafka 없이 띄울 때는 `transfer.outbox.publisher.enabled=false`로 끕니다([송금 완료 이벤트](#송금-완료-이벤트-kafka)).
+   - 송금 완료 이벤트를 발행하려면 Kafka가 필요합니다(`docker compose up -d kafka`, 기본 `localhost:9092`, `KAFKA_BOOTSTRAP_SERVERS`로 변경). Kafka가 없어도 송금 처리 자체는 Kafka를 부르지 않지만, 토픽 선언과 발행이 실패해 기동이 느려지고 실패 로그가 주기마다 남을 수 있습니다(Kafka 없는 로컬 기동은 2026-11-15 기준 직접 확인하지 않음). Kafka 없이 띄울 때는 `transfer.outbox.publisher.enabled=false`로 끕니다([송금 완료 이벤트](#송금-완료-이벤트-kafka)). user-service까지 이어 띄우는 순서·확인 명령·장애 재현은 [송금 완료 알림 Kafka 가이드](transfer-notification-kafka.md)에 있습니다.
 
 5. 테이블은 앱이 시작할 때 Flyway가 만듭니다([DB 스키마](#db-스키마-flyway)).
 

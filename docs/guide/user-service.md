@@ -467,24 +467,8 @@ payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.comple
 | 경보 | 로컬 Grafana `송금 완료 알림 DLT 적재`(최근 10분 증가 > 0), 대시보드 **비동기 처리** 행의 `송금 알림 DLT 적재` |
 | DLT 전송 실패 | Kafka 장애로 DLT에 못 보내면 그 메시지를 넘기지 않고 처음부터 다시 처리합니다(잃지 않음). 그동안 같은 파티션의 뒤 메시지는 기다립니다 |
 
-확인 (로컬, Kafka 컨테이너 안):
-
-```bash
-docker exec -it <kafka 컨테이너> /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 --topic payment.transfer.completed.DLT --from-beginning \
-  --property print.key=true --property print.headers=true --property print.offset=true
-```
-
-재투입: 원인을 해결한 뒤(Slack 복구 등) `exhausted` 메시지의 키·값·`eventId` 헤더를 원 토픽에 그대로 넣습니다. 소비자가 `eventId`로 중복을 거르므로 이미 알린 이벤트를 넣어도 다시 보내지 않습니다. `invalid`는 다시 넣어도 같은 이유로 DLT로 돌아오므로 넣지 않고, 발행 쪽(payment) 계약 위반을 확인합니다.
-
-```bash
-# 한 줄 형식: 헤더<TAB>키<TAB>값  (헤더는 eventId:<UUID>)
-docker exec -i <kafka 컨테이너> /opt/kafka/bin/kafka-console-producer.sh \
-  --bootstrap-server localhost:9092 --topic payment.transfer.completed \
-  --property parse.key=true --property parse.headers=true
-```
-
-- 재투입은 `TransferCompletedConsumerIntegrationTest`에서 DLT 메시지의 키·값·`eventId`를 원 토픽에 다시 넣어 Slack 전송·`notified_at` 기록까지 확인했습니다. 위 콘솔 명령은 로컬에서 직접 해 보지 않았습니다.
+- 재투입: 원인을 해결한 뒤(Slack 복구 등) `exhausted` 메시지의 키·값·`eventId` 헤더를 원 토픽에 그대로 넣습니다. 소비자가 `eventId`로 중복을 거르므로 이미 알린 이벤트를 넣어도 다시 보내지 않습니다. `invalid`는 다시 넣어도 같은 이유로 DLT로 돌아오므로 넣지 않고, 발행 쪽(payment) 계약 위반을 확인합니다.
+- DLT 확인·재투입 명령과 운영 절차는 [송금 완료 알림 Kafka 가이드](transfer-notification-kafka.md#dlt-운영)에 있습니다. 재투입은 `TransferCompletedConsumerIntegrationTest`에서 DLT 메시지의 키·값·`eventId`를 원 토픽에 다시 넣어 Slack 전송·`notified_at` 기록까지 확인했고, 콘솔 명령은 로컬에서 직접 해 보지 않았습니다.
 - DLT 메시지를 다 처리해도 DLT에서 지우지 않습니다. 30일 보관 뒤 Kafka가 지웁니다. 어디까지 처리했는지는 오프셋으로 기록해 둡니다.
 
 ### 설정
@@ -509,7 +493,7 @@ export SLACK_WEBHOOK_URL='<Slack Incoming Webhook 주소>'   # 없으면 기록�
 ./gradlew :user-service:bootRun
 ```
 
-payment-service도 발행기가 켜진 기본 설정으로 띄운 뒤 송금 하나를 완료하면 채널에 위 문구가 올라옵니다. Kafka 없이 띄울 때는 `--travelpay.user.transfer-notification.consumer-enabled=false`로 소비자를 끕니다(Kafka 없이 소비자를 켠 기동은 2026-11-20 기준 직접 확인하지 않음).
+payment-service도 발행기가 켜진 기본 설정으로 띄운 뒤 송금 하나를 완료하면 채널에 위 문구가 올라옵니다. 원 토픽은 payment-service가 만들므로, Kafka 볼륨이 새것이면 처음 한 번은 payment를 먼저 띄웁니다. 확인 명령과 장애 재현 절차는 [송금 완료 알림 Kafka 가이드](transfer-notification-kafka.md)에 있습니다. Kafka 없이 띄울 때는 `--travelpay.user.transfer-notification.consumer-enabled=false`로 소비자를 끕니다(Kafka 없이 소비자를 켠 기동은 2026-11-20 기준 직접 확인하지 않음).
 
 jar로 띄울 때도 환경 변수는 같은 방법으로 넘깁니다. 앱은 `.env`를 직접 읽지 않습니다.
 
