@@ -586,6 +586,8 @@ Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 
 ./gradlew :user-service:test
 ```
 
+2026-11-21 기준(송금 완료 알림·화면 알림·일괄 이름 조회, 포크 `feat/353-transfer-kafka`) user-service 전체 78개 클래스 1,014건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Redis·Kafka 포함, `--rerun`, 약 7분 45초).
+
 테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다. 소비자 테스트는 이벤트 하나로 화면 알림이 보낸 사람·받는 사람에게 한 행씩 생기는지, 재전달·Slack 실패에도 그대로인지도 봅니다. 화면 알림 조회·읽음은 `UserNotificationServiceIntegrationTest`(PostgreSQL)·`UserNotificationControllerTest`가 확인합니다. DB 테스트 공통 설정(`PostgresJpaTestConfiguration`)은 앱처럼 `currentSchema=user_service`로 연결해 스키마 이름 없는 native SQL도 같은 표를 씁니다.
 
 비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 관리자 API는 실제 HTTP·PostgreSQL·Redis로 MASTER 권한·CSRF·세션 버전·검색·약관 등록을, 실제 PostgreSQL로 동시 정지·잠금 대기·약관 동시 등록을 확인합니다. 세션 Redis가 꺼진 상태와 메모리가 가득 찬 상태의 health도 확인합니다. API 문서는 실제 HTTP로 그룹·입력칸과 로그인·CSRF 표시가 실제 보안 동작과 같은지, 배포 설정에서 문서 주소가 꺼지는지 확인합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.

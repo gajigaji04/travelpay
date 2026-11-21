@@ -805,7 +805,7 @@ flowchart TD
   - 테스트마다 롤백하고 복구·정산 스케줄러는 끈 상태로 돕니다. 예외는 `TransferConsistencyIntegrationTest`로, 동시 요청끼리 서로의 커밋을 봐야 해서 트랜잭션 없이 실행하고 테스트가 끝나면 만든 송금·이력을 지웁니다.
   - Gradle은 환경 변수를 테스트 입력으로 보지 않아 이전 결과를 재사용할 수 있습니다. 다시 실행하려면 `--rerun`을 붙입니다.
 - 커버리지 리포트(JaCoCo)는 테스트 후 `payment-service/build/reports/jacoco/test/html/index.html`에 생성됩니다.
-- 2026-11-15 기준(완료 이벤트 Outbox·Kafka 발행 #327) `transfer.*` 26개 클래스 414건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Kafka 포함, `--rerun`). payment-service 전체 48개 클래스 937건도 모두 통과합니다. 이전 기록: 2026-11-13(받은 내역 `COMPLETED`만·취소 API 제거) `transfer.*` 24개 클래스 395건·전체 45개 클래스 905건, 2026-11-13(원장 서킷 브레이커) `transfer.*` 411건·전체 921건, 2026-11-13(#304 요청 해시 제거) `transfer.*` 406건·전체 916건, 2026-11-13(#308) `transfer.*` 25개 클래스 398건·전체 867건, 2026-11-10(dev `6a407bc`) 371건, 2026-11-06(dev `9145ba9`) 362건.
+- 2026-11-21 기준(송금 응답 상대방 이름 `counterpartName` 추가, 포크 `feat/353-transfer-kafka`) `transfer.*` 26개 클래스 417건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Kafka 포함, `--rerun`). payment-service 전체 48개 클래스 940건도 모두 통과합니다. 이전 기록: 2026-11-15(완료 이벤트 Outbox·Kafka 발행 #327) `transfer.*` 26개 클래스 414건·전체 48개 클래스 937건, 2026-11-13(받은 내역 `COMPLETED`만·취소 API 제거) `transfer.*` 24개 클래스 395건·전체 45개 클래스 905건, 2026-11-13(원장 서킷 브레이커) `transfer.*` 411건·전체 921건, 2026-11-13(#304 요청 해시 제거) `transfer.*` 406건·전체 916건, 2026-11-13(#308) `transfer.*` 25개 클래스 398건·전체 867건, 2026-11-10(dev `6a407bc`) 371건, 2026-11-06(dev `9145ba9`) 362건.
 
 ### 테스트 구성
 
