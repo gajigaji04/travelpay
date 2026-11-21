@@ -18,10 +18,17 @@ import com.travelpay.user.domain.model.entity.User;
 import com.travelpay.user.domain.repository.UserRepository;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -30,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.GenericContainer;
@@ -122,6 +130,7 @@ class TransferCompletedConsumerIntegrationTest {
 
     @Autowired private JdbcTemplate jdbc;
     @Autowired private UserRepository users;
+    @Autowired private MeterRegistry meterRegistry;
 
     private final KafkaProducer<String, String> producer = new KafkaProducer<>(Map.of(
             ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers(),
@@ -204,34 +213,47 @@ class TransferCompletedConsumerIntegrationTest {
         });
     }
 
-    // Slack이 계속 실패하면 1초 간격 2번 다시 보낸 뒤 포기하고 다음 메시지로 넘어감. 수신 기록은 미발송으로 남고,
-    // 같은 이벤트가 다시 전달되면(payment 재발행) 그때 보냄
+    // Slack이 계속 실패하면 1초 간격 2번 다시 보낸 뒤 포기하고 DLT로 보낸 다음 다음 메시지로 넘어감. 수신 기록은 미발송으로 남고,
+    // DLT 메시지를 원 토픽에 다시 넣으면(가이드의 수동 재투입) 그때 보냄
     @Test
-    void aSlackFailureIsRetriedThenLeftUnnotifiedAndSentWhenTheEventComesAgain() {
+    void aSlackFailureIsRetriedThenDeadLetteredAndSentWhenReplayedFromTheDlt() {
         var transferId = UUID.randomUUID();
         var eventId = UUID.randomUUID();
         var payload = payload(transferId, UUID.randomUUID(), UUID.randomUUID(), 5000, "KRW");
+        double exhaustedBefore = deadLetterCount("exhausted");
         SLACK_STATUS.set(500);
 
         send(transferId.toString(), eventId.toString(), payload);
         await(() -> bodiesFor(transferId).size() >= 3, "재시도 포함 3번 전송");
+        var deadLetter = awaitDeadLetters(transferId.toString(), 1).getFirst();
         SLACK_STATUS.set(200);
         awaitMarkerAfter(transferId.toString());
 
         assertEquals(3, bodiesFor(transferId).size());
         assertNull(notifiedAt(eventId));
         assertEquals(2, screenNotifications(transferId).size(), "Slack이 실패해도 화면 알림은 남음");
+        assertEquals(payload, deadLetter.value());
+        assertEquals(eventId.toString(), header(deadLetter, TransferCompletedConsumer.EVENT_ID_HEADER));
+        assertEquals("exhausted", header(deadLetter, TransferNotificationKafkaConfig.FAILURE_KIND_HEADER));
+        assertTrue(header(deadLetter, TransferNotificationKafkaConfig.FAILURE_REASON_HEADER).endsWith("reason=HTTP 500"));
+        assertEquals(TransferCompletedConsumer.TOPIC, header(deadLetter, KafkaHeaders.DLT_ORIGINAL_TOPIC));
+        assertEquals(originalPartition(deadLetter), deadLetter.partition(), "원본과 같은 파티션 번호");
+        assertNotNull(header(deadLetter, KafkaHeaders.DLT_EXCEPTION_FQCN));
+        assertNull(deadLetter.headers().lastHeader(KafkaHeaders.DLT_EXCEPTION_MESSAGE), "예외 메시지는 남기지 않음");
+        assertNull(deadLetter.headers().lastHeader(KafkaHeaders.DLT_EXCEPTION_STACKTRACE), "스택은 남기지 않음");
+        assertEquals(exhaustedBefore + 1, deadLetterCount("exhausted"));
 
-        send(transferId.toString(), eventId.toString(), payload);
+        replay(deadLetter);
         awaitNotified(eventId);
         assertEquals(4, bodiesFor(transferId).size());
     }
 
-    // 형식이 잘못된 메시지는 재시도 없이 넘기고, 뒤의 정상 메시지는 처리함(소비자가 멈추지 않음)
+    // 형식이 잘못된 메시지는 재시도 없이 DLT로 보내고, 뒤의 정상 메시지는 처리함(소비자가 멈추지 않음)
     @Test
-    void malformedEventsAreSkippedAndTheConsumerKeepsGoing() {
+    void malformedEventsAreDeadLetteredWithoutRetryAndTheConsumerKeepsGoing() {
         var key = UUID.randomUUID().toString();
         var withoutHeader = UUID.randomUUID();
+        double invalidBefore = deadLetterCount("invalid");
 
         send(key, null, payload(withoutHeader, UUID.randomUUID(), UUID.randomUUID(), 1000, "KRW"));
         send(key, UUID.randomUUID().toString(), "{not json");
@@ -242,6 +264,16 @@ class TransferCompletedConsumerIntegrationTest {
         assertEquals(0, jdbc.queryForObject(
                 "select count(*) from user_service.transfer_notifications where transfer_id = ?", Integer.class,
                 withoutHeader));
+        var deadLetters = awaitDeadLetters(key, 3);
+        assertEquals(3, deadLetters.size(), "표시용 정상 이벤트는 DLT로 가지 않음");
+        deadLetters.forEach(record ->
+                assertEquals("invalid", header(record, TransferNotificationKafkaConfig.FAILURE_KIND_HEADER)));
+        assertTrue(header(deadLetters.get(0), TransferNotificationKafkaConfig.FAILURE_REASON_HEADER)
+                .endsWith("reason=eventId 헤더 없음"));
+        assertTrue(header(deadLetters.get(1), TransferNotificationKafkaConfig.FAILURE_REASON_HEADER)
+                .endsWith("reason=값 JSON 형식 오류"));
+        assertEquals("{not json", deadLetters.get(1).value());
+        assertEquals(invalidBefore + 3, deadLetterCount("invalid"));
     }
 
     private List<Map<String, Object>> screenNotifications(UUID transferId) {
@@ -289,6 +321,59 @@ class TransferCompletedConsumerIntegrationTest {
                 throw new AssertionError(exception);
             }
         }
+    }
+
+    /**
+     * DLT에서 키가 key인 메시지가 expected건 모일 때까지 읽어 오프셋 순으로 돌려줍니다.
+     * 같은 키는 같은 파티션으로 가므로 오프셋 순이 보낸 순서입니다.
+     */
+    private static List<ConsumerRecord<String, String>> awaitDeadLetters(String key, int expected) {
+        try (var consumer = new KafkaConsumer<String, String>(Map.of(
+                ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers(),
+                ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
+                ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class))) {
+            var partitions = new java.util.ArrayList<TopicPartition>();
+            for (int partition = 0; partition < TransferNotificationKafkaConfig.TOPIC_PARTITIONS; partition++) {
+                partitions.add(new TopicPartition(TransferNotificationKafkaConfig.DLT_TOPIC, partition));
+            }
+            consumer.assign(partitions);
+            consumer.seekToBeginning(partitions);
+            var found = new java.util.ArrayList<ConsumerRecord<String, String>>();
+            var deadline = System.nanoTime() + WAIT.toNanos();
+            while (found.size() < expected && System.nanoTime() < deadline) {
+                consumer.poll(Duration.ofMillis(200)).forEach(record -> {
+                    if (key.equals(record.key())) {
+                        found.add(record);
+                    }
+                });
+            }
+            if (found.size() < expected) {
+                throw new AssertionError("DLT에서 key=" + key + " 메시지 " + expected + "건을 " + WAIT + " 안에 찾지 못했습니다. found="
+                        + found.size());
+            }
+            found.sort(java.util.Comparator.comparingLong(ConsumerRecord::offset));
+            return found;
+        }
+    }
+
+    /** 가이드의 수동 재투입처럼 DLT 메시지의 키·값·eventId 헤더를 원 토픽에 다시 넣습니다. */
+    private void replay(ConsumerRecord<String, String> deadLetter) {
+        send(deadLetter.key(), header(deadLetter, TransferCompletedConsumer.EVENT_ID_HEADER), deadLetter.value());
+    }
+
+    private static String header(ConsumerRecord<String, String> record, String name) {
+        Header header = record.headers().lastHeader(name);
+        return header == null ? null : new String(header.value(), StandardCharsets.UTF_8);
+    }
+
+    /** Spring Kafka가 붙이는 원본 파티션 헤더(4바이트 int)입니다. */
+    private static int originalPartition(ConsumerRecord<String, String> record) {
+        return java.nio.ByteBuffer.wrap(record.headers().lastHeader(KafkaHeaders.DLT_ORIGINAL_PARTITION).value()).getInt();
+    }
+
+    private double deadLetterCount(String kind) {
+        var counter = meterRegistry.find(TransferNotificationKafkaConfig.DEAD_LETTER_METRIC).tag("kind", kind).counter();
+        return counter == null ? 0 : counter.count();
     }
 
     private void send(String key, String eventId, String value) {

@@ -281,6 +281,8 @@ set -a; source .env; set +a
 
 기동 확인: Eureka `http://localhost:8761`에 서비스가 `UP`으로 보이면 됩니다.
 
+송금 완료 알림(Kafka) 흐름의 확인 명령, 장애 재현, DLT 재투입은 [송금 완료 알림 Kafka 가이드](docs/guide/transfer-notification-kafka.md)에 있습니다.
+
 ### 4. 프론트엔드
 
 ```bash

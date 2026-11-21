@@ -31,4 +31,17 @@ public interface TransferNotificationJpaRepository extends JpaRepository<Transfe
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select notification from TransferNotification notification where notification.eventId = :eventId")
     Optional<TransferNotification> findByEventIdForUpdate(@Param("eventId") UUID eventId);
+
+    // JPQL에는 limit·skip locked가 없어 native로 씁니다. Slack 전송 중(findByEventIdForUpdate)인 행은 건너뜁니다.
+    @Modifying
+    @Query(value = """
+            delete from transfer_notifications
+            where event_id in (
+                select event_id from transfer_notifications
+                where received_at < :cutoff
+                order by received_at
+                limit :limit
+                for update skip locked)
+            """, nativeQuery = true)
+    int deleteReceivedBefore(@Param("cutoff") Instant cutoff, @Param("limit") int limit);
 }

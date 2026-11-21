@@ -53,6 +53,16 @@ transfer:
     publisher:
       # 운영 Kafka 설정(KAFKA_BOOTSTRAP_SERVERS 등)을 인프라와 정하기 전까지 발행하지 않습니다. Outbox 행은 PENDING으로 쌓입니다
       enabled: false
+    monitor:
+      # 미발행(PENDING) 건수·가장 오래된 건의 나이 지표. 발행기가 꺼져 있는 동안 쌓인 양을 볼 수 있습니다
+      enabled: true
+    cleanup:
+      # 발행한 지 7일이 지난 PUBLISHED 행만 지웁니다(발행기가 꺼져 있으면 지울 행이 없음)
+      enabled: true
+      retention: 7d
+      batch-size: 1000
+      initial-delay: 5m
+      fixed-delay: 1h
 
 server:
   port: 8080

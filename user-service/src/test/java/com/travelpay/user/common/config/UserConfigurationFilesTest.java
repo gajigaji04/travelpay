@@ -140,6 +140,23 @@ class UserConfigurationFilesTest {
         assertEquals(false, configured.toString().contains("hooks.example.test"));
     }
 
+    // 로컬·운영 모두 읽은 화면 알림 90일, 수신 기록 30일(토픽 보관 기간보다 김)로 정리하고 정리 주기를 켬
+    @ParameterizedTest
+    @ValueSource(strings = {"application.yml", "application-prod.yml"})
+    void notificationRetentionKeepsReadNotificationsFor90DaysAndTransferEventsFor30Days(String filename)
+            throws IOException {
+        var environment = environment(filename);
+        var properties = Binder.get(environment)
+                .bind("travelpay.user.notification-retention", NotificationRetentionProperties.class).get();
+
+        assertEquals(Duration.ofDays(90), properties.readNotificationRetention());
+        assertEquals(Duration.ofDays(30), properties.transferEventRetention());
+        assertEquals(1000, properties.batchSize());
+        assertEquals("true", environment.getProperty("travelpay.user.notification-retention.enabled"));
+        assertEquals(Duration.ofHours(1), Binder.get(environment)
+                .bind("travelpay.user.notification-retention.fixed-delay", Duration.class).get());
+    }
+
     private static TransferNotificationProperties transferNotification(MockEnvironment environment) {
         return Binder.get(environment)
                 .bind("travelpay.user.transfer-notification", TransferNotificationProperties.class).get();

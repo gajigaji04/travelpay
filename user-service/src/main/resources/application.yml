@@ -57,6 +57,17 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       # 컨슈머 그룹이 처음 붙을 때 그 전에 쌓인 송금 완료 이벤트도 처리합니다.
       auto-offset-reset: earliest
+    # 처리를 포기한 송금 완료 이벤트를 DLT(payment.transfer.completed.DLT)로 보낼 때만 씁니다. 받은 키·값(문자열)을 그대로 보냅니다.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        # Kafka가 꺼져 있을 때 소비자 스레드가 오래 멈추지 않도록 짧게 (payment-service 발행기와 같은 값)
+        delivery.timeout.ms: 5000
+        request.timeout.ms: 3000
+        max.block.ms: 3000
 
 travelpay:
   auth:
@@ -92,6 +103,17 @@ travelpay:
       concurrency: 1
       # Slack Incoming Webhook 주소(비밀값, 환경 변수로만). 비어 있으면 수신 기록만 하고 보내지 않습니다.
       slack-webhook-url: ${SLACK_WEBHOOK_URL:}
+    notification-retention:
+      # 보관 기간이 지난 화면 알림(읽은 것만)과 송금 완료 수신 기록을 주기적으로 지웁니다.
+      enabled: true
+      # 읽은 화면 알림은 발생 시각부터 90일. 읽지 않은 알림은 기간이 지나도 남깁니다.
+      read-notification-retention: 90d
+      # 수신 기록(Slack 중복 거르기)은 받은 시각부터 30일. 토픽 보관 기간(Kafka 기본 7일)보다 길어야 합니다(7일 미만 거부).
+      transfer-event-retention: 30d
+      # 한 트랜잭션에서 지울 최대 행 수. 한 주기에 테이블마다 최대 100번까지 반복합니다.
+      batch-size: 1000
+      initial-delay: 5m
+      fixed-delay: 1h
 
 server:
   port: 8081

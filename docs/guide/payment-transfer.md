@@ -35,7 +35,7 @@
    - `PAYMENT_DB_URL`이 비어 있으면 `'url' must start with "jdbc"`로 시작을 멈춥니다. `.env`를 불러오지 않은 터미널에서 실행한 경우입니다.
    - Eureka 대신 원장·회원 서비스를 직접 주소로 부를 때는 `LEDGER_SERVICE_URL`·`USER_SERVICE_URL`을 지정합니다(예: `http://localhost:8085`). 비우면 Eureka에서 찾습니다.
    - 배포 설정(`application-prod.yml`)은 `SPRING_CONFIG_NAME=application-prod`로 선택합니다.
-   - 송금 완료 이벤트를 발행하려면 Kafka가 필요합니다(`docker compose up -d kafka`, 기본 `localhost:9092`, `KAFKA_BOOTSTRAP_SERVERS`로 변경). Kafka가 없어도 송금 처리 자체는 Kafka를 부르지 않지만, 토픽 선언과 발행이 실패해 기동이 느려지고 실패 로그가 주기마다 남을 수 있습니다(Kafka 없는 로컬 기동은 2026-11-15 기준 직접 확인하지 않음). Kafka 없이 띄울 때는 `transfer.outbox.publisher.enabled=false`로 끕니다([송금 완료 이벤트](#송금-완료-이벤트-kafka)).
+   - 송금 완료 이벤트를 발행하려면 Kafka가 필요합니다(`docker compose up -d kafka`, 기본 `localhost:9092`, `KAFKA_BOOTSTRAP_SERVERS`로 변경). Kafka가 없어도 송금 처리 자체는 Kafka를 부르지 않지만, 토픽 선언과 발행이 실패해 기동이 느려지고 실패 로그가 주기마다 남을 수 있습니다(Kafka 없는 로컬 기동은 2026-11-15 기준 직접 확인하지 않음). Kafka 없이 띄울 때는 `transfer.outbox.publisher.enabled=false`로 끕니다([송금 완료 이벤트](#송금-완료-이벤트-kafka)). user-service까지 이어 띄우는 순서·확인 명령·장애 재현은 [송금 완료 알림 Kafka 가이드](transfer-notification-kafka.md)에 있습니다.
 
 5. 테이블은 앱이 시작할 때 Flyway가 만듭니다([DB 스키마](#db-스키마-flyway)).
 
@@ -655,14 +655,31 @@ flowchart TD
 | 선점 | `PENDING` 행을 `FOR UPDATE SKIP LOCKED`로 잠근 채 보내고 같은 트랜잭션에서 `PUBLISHED`로 바꿈. 서버가 여러 대여도 같은 건을 함께 보내지 않음 |
 | 순서 | 실패 횟수 적은 순 → 오래된 순(계속 실패하는 건이 새 건을 막지 않게) |
 | 시간 제한 | 보내기 3초, 응답 대기 8초, 트랜잭션 10초. producer `max.block.ms` 3초·`delivery.timeout.ms` 5초, `acks=all`·멱등 producer |
-| 실패 | 행을 `PENDING`으로 두고 `retry_count`만 올림. 다음 주기에 다시 보내며 횟수 한도·DLT는 없음(추후) |
+| 실패 | 행을 `PENDING`으로 두고 `retry_count`만 올림. 다음 주기에 다시 보내며 횟수 한도는 없음(알림 이벤트라 늦게라도 보냄). 오래 밀리면 아래 [미발행 지표](#미발행-지표와-published-정리)로 알아챔. 소비 실패는 소비자 쪽 DLT([user-service 가이드](user-service.md#송금-완료-알림-dlt)) |
 | 상태 변경 실패 | 롤백되어 `PENDING`으로 남고 같은 `eventId`로 다시 발행(중복 전달) |
 | 끄기 | `transfer.outbox.publisher.enabled=false`. 발행기와 토픽 선언이 등록되지 않고 행은 `PENDING`으로 쌓임 |
 
 - 토픽은 브로커 자동 생성이 꺼져 있어 `TransferKafkaTopicConfig`가 선언합니다(발행기가 켜져 있을 때만).
 - 발행기는 Kafka가 멈추면 주기마다 몇 초씩 막히므로 복구 스케줄러와 다른 스레드에서 돕니다([복구 스케줄러](#복구-스케줄러)의 스레드 수).
 - **운영(`application-prod.yml`)에서는 발행기가 꺼져 있습니다.** 운영 Kafka 주소(`KAFKA_BOOTSTRAP_SERVERS`)를 인프라와 정한 뒤 켭니다. 그동안 운영의 완료 이벤트는 `PENDING`으로 쌓이고, 켜는 순간 쌓인 이벤트가 한꺼번에 발행됩니다. 오래된 알림을 보내지 않으려면 켜기 전에 쌓인 행을 정리할지 정해야 합니다.
-- `PUBLISHED` 행 정리(보관 기간)와 미발행 건수 지표·알림은 아직 없습니다. 미발행 건은 `select count(*) from transfer_outbox where status = 'PENDING'`으로 봅니다.
+
+### 미발행 지표와 PUBLISHED 정리
+
+2026-11-21 추가. 발행기와 따로 켜고 끕니다.
+
+| 항목 | 내용 |
+|---|---|
+| 지표 `transfer_outbox_pending` | `PENDING` 건수 |
+| 지표 `transfer_outbox_pending_oldest_age_seconds` | 가장 오래된 `PENDING` 행이 생긴 뒤 지난 초(없으면 0). 발행기가 1초마다 보내므로 평소 몇 초 안이고, Kafka 장애·발행기 꺼짐 동안 계속 커짐 |
+| 지표 갱신 | `TransferOutboxBacklogMonitor`가 30초마다 건수와 가장 오래된 생성 시각을 조회(부분 인덱스 `ix_transfer_outbox_pending`). 나이는 지표를 읽는 시각 기준으로 계산. 끄기 `transfer.outbox.monitor.enabled=false` |
+| 경보 | 로컬 Grafana `송금 완료 이벤트 5분 넘게 미발행`(나이 > 300초), 대시보드 **비동기 처리** 행에 두 패널 |
+| PUBLISHED 정리 | `TransferOutboxCleanupScheduler` → `TransferOutboxCleanupService`. 5분 뒤부터 1시간마다 `published_at`이 7일 지난 `PUBLISHED` 행을 1,000행씩 각자 트랜잭션으로, 한 주기에 최대 100번 지움. 잠긴 행은 건너뜀(`SKIP LOCKED`) |
+| 정리 설정 | `transfer.outbox.cleanup.enabled`·`retention`(7d, 1일 미만 기동 거부)·`batch-size`(1~10,000)·`initial-delay`·`fixed-delay` |
+| 지우지 않는 것 | `PENDING` 행. 발행 전 이벤트는 기간과 관계없이 남깁니다 |
+
+- 지운 이벤트는 다시 발행할 수 없습니다. 소비 쪽 문제는 user-service DLT에 원본이 30일 남으므로, 7일은 Outbox에서 재발행할 일이 생겼을 때 알아챌 여유로 잡은 값입니다.
+- 두 스케줄러는 짧게 끝나(조회 1~2번, 정리는 1시간에 한 번) 스케줄러 풀(로컬 3·운영 2)을 늘리지 않았습니다.
+- **운영은 발행기가 꺼져 있어 `PENDING`이 계속 쌓이고 나이도 계속 늘어납니다.** 지표는 그 양을 보는 데 쓰고, 나이 경보는 발행기를 켠 뒤에 운영에 옮깁니다. 정리는 운영에서도 켜 두지만 `PUBLISHED` 행이 없어 지울 것이 없습니다.
 
 ### 로컬 수동 확인 (2026-11-20)
 
@@ -769,6 +786,7 @@ flowchart TD
 | `V20261113_2__drop_transfer_request_hash.sql` | `request_hash` 컬럼 삭제([D2](#d2-멱등성은-송금-테이블의-unique와-저장된-요청-값-비교로)) |
 | `V20261113_4__add_transfer_manual_review_index.sql` | `MANUAL_REVIEW` 건수·자동 대사 대상 조회용 부분 인덱스 |
 | `V20261115_1__create_transfer_outbox.sql` | 송금 완료 이벤트 Outbox 테이블 `transfer_outbox`([송금 완료 이벤트](#송금-완료-이벤트-kafka)) |
+| `V20261121_1__add_transfer_outbox_published_index.sql` | `PUBLISHED` 정리용 부분 인덱스([미발행 지표와 PUBLISHED 정리](#미발행-지표와-published-정리)) |
 
 | 제약·인덱스 | 내용 |
 |---|---|
@@ -787,7 +805,8 @@ flowchart TD
 | `ix_transfer_status_history_transfer_id` | 송금별 이력 조회(`transfer_id, created_at, id`) |
 | `uk_transfer_outbox_transfer_id`, `fk_transfer_outbox_transfer` | 송금 하나에 완료 이벤트 하나, 존재하는 송금에만 |
 | `ck_transfer_outbox_status`, `ck_transfer_outbox_published_at`, `ck_transfer_outbox_retry_count` | 상태는 `PENDING`·`PUBLISHED`, `PUBLISHED`일 때만 `published_at`이 있음, 실패 횟수는 0 이상 |
-| `ix_transfer_outbox_pending` | 발행기의 미발행 건 조회(`PENDING` 부분 인덱스) |
+| `ix_transfer_outbox_pending` | 발행기의 미발행 건 조회, 미발행 건수·가장 오래된 건 지표(`PENDING` 부분 인덱스) |
+| `ix_transfer_outbox_published` | 보관 기간이 지난 `PUBLISHED` 행을 `published_at` 순으로 찾아 지움(`PUBLISHED` 부분 인덱스) |
 
 - 회원·지갑은 다른 서비스 소유라 FK 없이 ID만 저장합니다. 송금인·수취인 ID와 두 지갑 ID를 모두 저장해 재전송 요청을 저장된 값만으로 만듭니다.
 - 이미 적용한 파일은 고치지 않고 다음 날짜·순번의 새 파일을 추가합니다. 결제 쪽과 같은 날짜를 쓰면 순번이 겹치지 않게 맞춥니다.
@@ -805,7 +824,7 @@ flowchart TD
   - 테스트마다 롤백하고 복구·정산 스케줄러는 끈 상태로 돕니다. 예외는 `TransferConsistencyIntegrationTest`로, 동시 요청끼리 서로의 커밋을 봐야 해서 트랜잭션 없이 실행하고 테스트가 끝나면 만든 송금·이력을 지웁니다.
   - Gradle은 환경 변수를 테스트 입력으로 보지 않아 이전 결과를 재사용할 수 있습니다. 다시 실행하려면 `--rerun`을 붙입니다.
 - 커버리지 리포트(JaCoCo)는 테스트 후 `payment-service/build/reports/jacoco/test/html/index.html`에 생성됩니다.
-- 2026-11-21 기준(송금 응답 상대방 이름 `counterpartName` 추가, 포크 `feat/353-transfer-kafka`) `transfer.*` 26개 클래스 417건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Kafka 포함, `--rerun`). payment-service 전체 48개 클래스 940건도 모두 통과합니다. 이전 기록: 2026-11-15(완료 이벤트 Outbox·Kafka 발행 #327) `transfer.*` 26개 클래스 414건·전체 48개 클래스 937건, 2026-11-13(받은 내역 `COMPLETED`만·취소 API 제거) `transfer.*` 24개 클래스 395건·전체 45개 클래스 905건, 2026-11-13(원장 서킷 브레이커) `transfer.*` 411건·전체 921건, 2026-11-13(#304 요청 해시 제거) `transfer.*` 406건·전체 916건, 2026-11-13(#308) `transfer.*` 25개 클래스 398건·전체 867건, 2026-11-10(dev `6a407bc`) 371건, 2026-11-06(dev `9145ba9`) 362건.
+- 2026-11-21 기준(Outbox `PUBLISHED` 정리·미발행 지표, 포크 `feat/transfer-notification-ops`) `transfer.*` 27개 클래스 422건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Kafka 포함, `--rerun`). payment-service 전체 49개 클래스 945건도 모두 통과합니다. 이전 기록: 2026-11-21(송금 응답 상대방 이름 `counterpartName`) `transfer.*` 26개 클래스 417건·전체 48개 클래스 940건, 2026-11-15(완료 이벤트 Outbox·Kafka 발행 #327) `transfer.*` 26개 클래스 414건·전체 48개 클래스 937건, 2026-11-13(받은 내역 `COMPLETED`만·취소 API 제거) `transfer.*` 24개 클래스 395건·전체 45개 클래스 905건, 2026-11-13(원장 서킷 브레이커) `transfer.*` 411건·전체 921건, 2026-11-13(#304 요청 해시 제거) `transfer.*` 406건·전체 916건, 2026-11-13(#308) `transfer.*` 25개 클래스 398건·전체 867건, 2026-11-10(dev `6a407bc`) 371건, 2026-11-06(dev `9145ba9`) 362건.
 
 ### 테스트 구성
 
@@ -824,11 +843,12 @@ flowchart TD
 | `MANUAL_REVIEW` 자동 대사(원장 결과별 확정·유지, 1분 대기, 조회 실패 3번 중단·같은 위치부터, 자동 확정 뒤 운영자 확정 409) | `TransferReviewReconcilerIntegrationTest` |
 | 완료 이벤트 Outbox 기록(완료 경로 4개마다 1건, `FAILED`는 없음, 동시 복구·확정에도 1건, UNIQUE, Outbox 저장 실패 시 상태·이력 롤백 후 재확정) | `TransferOutboxIntegrationTest`, `TransferLedgerFlowTest` |
 | 완료 이벤트 Kafka 발행(토픽·키·헤더·본문 계약, Kafka 멈춤 중 송금 완료·행 유지·복구 후 발행, 발행기 2개 SKIP LOCKED, 상태 변경 실패 시 같은 `eventId` 재발행) | `TransferOutboxPublisherIntegrationTest` |
+| Outbox 운영(7일 지난 `PUBLISHED`만 정리·`PENDING` 유지, 배치 반복, 잠긴 행 건너뛰고 다음 주기에 정리, 설정 검증, 미발행 건수·가장 오래된 나이 지표) | `TransferOutboxMaintenanceIntegrationTest` |
 | Swagger 문서 | `TransferApiDocsIntegrationTest` |
 
 `integration` 패키지 테스트는 실제 PostgreSQL·서비스·컨트롤러를 쓰고 Feign 인터페이스(`LedgerFeignApi`·`WalletFeignApi`·`UserFeignApi`)만 바꿔 끼웁니다(`TransferApiIntegrationSupport`).
 
-Outbox 테스트 2개는 커밋·롤백을 봐야 해서 트랜잭션 없이 실행하고 만든 데이터를 지웁니다(`TransferOutboxIntegrationSupport`). `TransferOutboxPublisherIntegrationTest`만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄웁니다. 나머지 payment-service 테스트는 Kafka 없이 돌도록 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 발행기를 끕니다.
+Outbox 테스트 3개는 커밋·롤백을 봐야 해서 트랜잭션 없이 실행하고 만든 데이터를 지웁니다(`TransferOutboxIntegrationSupport`). `TransferOutboxPublisherIntegrationTest`만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄웁니다. 나머지 payment-service 테스트는 Kafka 없이 돌도록 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 발행기를 끕니다. 같은 설정에서 Outbox 지표 갱신·정리 스케줄러도 끄고, `TransferOutboxMaintenanceIntegrationTest`가 직접 호출합니다.
 
 ### 정합성 불변식
 
@@ -1646,7 +1666,7 @@ flowchart LR
 
 | 후보 | 도입하지 않은 이유 |
 |---|---|
-| 원장 연동의 Kafka·Outbox·DLT | 원장 결과는 응답에 바로 필요해 비동기로 바꿀 이유가 없습니다. 이 패턴들이 막는 문제(커밋과 전달 사이 유실, 중복 전달, 재시도 소진 건 방치)는 DB 상태·원장 reference 멱등·복구 스케줄러가 막습니다. 같은 패턴은 아닙니다. 아래 [Outbox·DLT와 현재 구조](#outboxdlt와-현재-구조). 송금 완료 알림은 구독할 서비스(user-service)가 정해져 2026-11-15에 Outbox + Kafka로 발행합니다([송금 완료 이벤트](#송금-완료-이벤트-kafka)). 자금 경로는 그대로이고 DLT는 아직 없습니다 |
+| 원장 연동의 Kafka·Outbox·DLT | 원장 결과는 응답에 바로 필요해 비동기로 바꿀 이유가 없습니다. 이 패턴들이 막는 문제(커밋과 전달 사이 유실, 중복 전달, 재시도 소진 건 방치)는 DB 상태·원장 reference 멱등·복구 스케줄러가 막습니다. 같은 패턴은 아닙니다. 아래 [Outbox·DLT와 현재 구조](#outboxdlt와-현재-구조). 송금 완료 알림은 구독할 서비스(user-service)가 정해져 2026-11-15에 Outbox + Kafka로 발행합니다([송금 완료 이벤트](#송금-완료-이벤트-kafka)). 자금 경로는 그대로이고, 알림 소비 실패는 소비자(user-service)의 DLT로 보냅니다(2026-11-21) |
 | Saga·분산 트랜잭션 | 원장이 두 줄을 한 거래로 처리해 서비스 간 보상이 필요 없습니다(D1) |
 | Redis 멱등성 키·캐시 | DB UNIQUE가 기준이고, Redis 만료·장애 때 중복 경로만 늘어납니다(D2) |
 | 송금 전용 Resilience4j 설정 파일·bean | 원장 서킷 브레이커는 어댑터 안에서 만듭니다. 결제 클라이언트가 `CircuitBreaker`를 타입으로 주입받아 bean을 하나 더 두면 결제 쪽 주입이 깨지고, yml·`build.gradle`은 결제와 공용이라 바꾸지 않았습니다([원장 서킷 브레이커](#원장-서킷-브레이커)) |
@@ -1684,7 +1704,7 @@ Outbox·DLT가 막는 문제를 송금은 아래처럼 막습니다. 같은 문�
 
 | 조건 | 검토할 것 |
 |---|---|
-| 송금 결과를 구독할 서비스가 생김(수취인 알림, 통계·정산 집계 등) | **조건 충족, 2026-11-15 도입**: 완료 트랜잭션에 이벤트 행을 함께 저장하고 발행(Outbox), 소비자는 `eventId`로 중복 확인([송금 완료 이벤트](#송금-완료-이벤트-kafka)). DLT·`PUBLISHED` 행 정리는 추후 |
+| 송금 결과를 구독할 서비스가 생김(수취인 알림, 통계·정산 집계 등) | **조건 충족, 2026-11-15 도입**: 완료 트랜잭션에 이벤트 행을 함께 저장하고 발행(Outbox), 소비자는 `eventId`로 중복 확인([송금 완료 이벤트](#송금-완료-이벤트-kafka)). 소비 실패 DLT(user-service)·`PUBLISHED` 행 정리·미발행 지표는 2026-11-21 추가 |
 | 원장 호출을 비동기로 바꿔야 함(원장 처리 시간이 응답 기한을 넘는 경우 등) | 원장 API 계약을 바꿔야 하므로 원장 담당과 먼저 협의합니다. 사용자 응답은 모두 202 + 결과 조회가 됩니다 |
 
 ## 알려진 한계

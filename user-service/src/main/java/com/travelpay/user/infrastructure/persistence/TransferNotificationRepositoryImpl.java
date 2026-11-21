@@ -27,4 +27,9 @@ public class TransferNotificationRepositoryImpl implements TransferNotificationR
     public Optional<TransferNotification> findByEventIdForUpdate(UUID eventId) {
         return transferNotificationJpaRepository.findByEventIdForUpdate(eventId);
     }
+
+    @Override
+    public int deleteReceivedBefore(Instant cutoff, int limit) {
+        return transferNotificationJpaRepository.deleteReceivedBefore(cutoff, limit);
+    }
 }

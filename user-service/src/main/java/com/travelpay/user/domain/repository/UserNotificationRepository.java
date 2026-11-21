@@ -30,4 +30,12 @@ public interface UserNotificationRepository {
 
     /** 회원의 읽지 않은 알림을 모두 읽음으로 바꾸고 바꾼 개수를 반환합니다. */
     int markAllRead(UUID userId, Instant readAt);
+
+    /**
+     * 발생 시각이 cutoff보다 이른 읽은 알림을 오래된 것부터 최대 limit개 지웁니다. 읽지 않은 알림은 지우지 않습니다.
+     * 다른 트랜잭션이 잠근 행은 기다리지 않고 건너뜁니다. 쓰기 트랜잭션 안에서 호출합니다.
+     *
+     * @return 지운 행 수
+     */
+    int deleteReadOccurredBefore(Instant cutoff, int limit);
 }

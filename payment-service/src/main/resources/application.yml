@@ -78,6 +78,18 @@ transfer:
       # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
       fixed-delay: 1s
       batch-size: 200
+    monitor:
+      # 미발행(PENDING) 건수·가장 오래된 건의 나이 지표(transfer_outbox_pending*). 발행기를 꺼도 켜 둡니다
+      enabled: true
+    cleanup:
+      # 발행한 지 보관 기간이 지난 PUBLISHED 행을 지웁니다. PENDING은 지우지 않습니다
+      enabled: true
+      # 발행 시각(published_at)부터 7일. 지운 이벤트는 다시 발행할 수 없습니다(1일 미만 거부)
+      retention: 7d
+      # 한 트랜잭션에서 지울 최대 행 수. 한 주기에 최대 100번까지 반복합니다
+      batch-size: 1000
+      initial-delay: 5m
+      fixed-delay: 1h
 
 server:
   port: 8083

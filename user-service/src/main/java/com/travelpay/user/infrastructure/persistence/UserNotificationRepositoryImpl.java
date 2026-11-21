@@ -45,4 +45,9 @@ public class UserNotificationRepositoryImpl implements UserNotificationRepositor
     public int markAllRead(UUID userId, Instant readAt) {
         return userNotificationJpaRepository.markAllRead(userId, readAt);
     }
+
+    @Override
+    public int deleteReadOccurredBefore(Instant cutoff, int limit) {
+        return userNotificationJpaRepository.deleteReadOccurredBefore(cutoff, limit);
+    }
 }

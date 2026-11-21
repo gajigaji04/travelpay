@@ -1408,13 +1408,146 @@
       ]
     },
     {
+      "id": 24,
+      "title": "송금 완료 이벤트 미발행 (Outbox, 건)",
+      "description": "payment-service가 30초마다 조회하는 transfer_outbox PENDING 건수입니다. 발행기가 1초마다 보내므로 평소에는 0 근처이고, Kafka 장애나 발행기 꺼짐(transfer.outbox.publisher.enabled=false) 동안 늘어납니다. DB 값이라 인스턴스마다 같아 max로 묶습니다.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 79,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (environment, service) (transfer_outbox_pending{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"})",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 25,
+      "title": "가장 오래된 미발행 송금 완료 이벤트",
+      "description": "가장 오래된 PENDING 행이 생긴 뒤 지난 시간입니다(없으면 0). 경보 규칙 transfer-outbox-pending-stale은 5분을 넘으면 Firing입니다.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 79,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (environment, service) (transfer_outbox_pending_oldest_age_seconds{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"})",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 26,
+      "title": "송금 알림 DLT 적재 (10분간 건수)",
+      "description": "user-service 송금 완료 알림 소비자가 처리를 포기하고 payment.transfer.completed.DLT로 보낸 건수의 10분간 증가량입니다. invalid는 형식 오류, exhausted는 Slack·DB 오류 재시도 소진입니다. 확인·재투입은 docs/guide/user-service.md 「송금 완료 알림 DLT」.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 79,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (environment, service, kind) (increase(transfer_notification_dead_letter_total{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}[10m]))",
+          "legendFormat": "{{service}} / {{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "id": 107,
       "type": "row",
       "title": "로그",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 79,
+        "y": 87,
         "w": 24,
         "h": 1
       },
@@ -1426,7 +1559,7 @@
       "type": "logs",
       "gridPos": {
         "x": 0,
-        "y": 80,
+        "y": 88,
         "w": 24,
         "h": 12
       },

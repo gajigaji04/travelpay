@@ -1,4 +1,4 @@
-# TRAVELPAY 로컬 Grafana 알림 규칙 - 송금 복구 상태
+# TRAVELPAY 로컬 Grafana 알림 규칙 - 송금 복구 상태(transfer-recovery), 송금 완료 알림 전달 상태(transfer-notification, 아래)
 #
 # 송금 복구 스케줄러가 10초마다 갱신하는 게이지(payment-service)를 봅니다.
 #   transfer_manual_review    : MANUAL_REVIEW 송금 수. 자동 처리가 끝나 운영자 확정(resolve)이 필요한 건
@@ -89,3 +89,86 @@ groups:
             정상이면 결과 모름 5회(약 7.5분) 안에 COMPLETED·FAILED·MANUAL_REVIEW로 끝나야 합니다.
             복구 스케줄러 동작(transfer.recovery.enabled, 스케줄러 스레드), payment DB 쓰기 오류, 원장 장애를 확인합니다.
             payment-service ERROR 로그에 오래된 송금 ID 10개가 남습니다.
+
+  # 송금 완료 알림(Kafka) 전달 상태
+  #   transfer_outbox_pending_oldest_age_seconds (payment-service, 30초마다 갱신): 가장 오래된 미발행 Outbox 행의 나이.
+  #       발행기가 1초마다 보내므로 5분을 넘으면 Kafka 장애나 발행기 정지입니다. 운영(prod)은 발행기를 꺼 두어 계속 늘어나므로
+  #       운영 경보에 옮길 때는 발행기를 켠 뒤에 적용합니다.
+  #   transfer_notification_dead_letter_total (user-service): 소비자가 처리를 포기하고 DLT로 보낸 건수(kind=invalid·exhausted).
+  #       자동 재처리가 없으므로 1건이라도 늘면 알립니다. 카운터라 재시작하면 0부터 다시 셉니다(increase가 보정).
+  - orgId: 1
+    name: transfer-notification
+    folder: TRAVELPAY
+    interval: 30s
+    rules:
+      - uid: transfer-outbox-pending-stale
+        title: 송금 완료 이벤트 5분 넘게 미발행
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus-local
+            model:
+              refId: A
+              expr: max by (environment, service) (transfer_outbox_pending_oldest_age_seconds{job="spring-jvm"})
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [300]
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+          domain: transfer
+        annotations:
+          summary: 가장 오래된 미발행 송금 완료 이벤트가 {{ $values.A.Value }}초 전에 생겼습니다.
+          description: >-
+            송금 처리에는 영향이 없고 알림만 늦어집니다. Kafka 상태, transfer.outbox.publisher.enabled,
+            payment-service의 「송금 완료 이벤트 발행 실패」 WARN 로그를 확인합니다. Kafka가 돌아오면 쌓인 건을 자동으로 보냅니다.
+            절차는 docs/guide/payment-transfer.md 「송금 완료 이벤트 (Kafka)」.
+
+      - uid: transfer-notification-dead-letter
+        title: 송금 완료 알림 DLT 적재
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus-local
+            model:
+              refId: A
+              expr: sum by (environment, service, kind) (increase(transfer_notification_dead_letter_total{job="spring-jvm"}[10m]))
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+          domain: transfer
+        annotations:
+          summary: 최근 10분간 송금 완료 알림 {{ $values.A.Value }}건이 DLT({{ $labels.kind }})로 갔습니다.
+          description: >-
+            invalid는 형식이 잘못된 이벤트(payment 발행 계약 확인), exhausted는 Slack·DB 오류로 재시도를 다 쓴 건입니다.
+            user-service ERROR 로그 「송금 완료 알림 처리 포기」에 원본 위치와 transferId가 남습니다.
+            확인·재투입 절차는 docs/guide/user-service.md 「송금 완료 알림 DLT」.

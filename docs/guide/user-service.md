@@ -440,17 +440,36 @@ payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.comple
 
 `TransferCompletedConsumer`(컨슈머 그룹 `user-transfer-notification`) → `TransferNotificationService`
 
-1. 헤더 `eventId`(UUID)와 값 JSON을 읽습니다. 헤더가 없거나 JSON이 깨졌거나 값이 계약과 다르면(금액 0 이하, 알 수 없는 통화 등) 재시도 없이 ERROR 로그를 남기고 다음 메시지로 넘어갑니다.
+1. 헤더 `eventId`(UUID)와 값 JSON을 읽습니다. 헤더가 없거나 JSON이 깨졌거나 값이 계약과 다르면(금액 0 이하, 알 수 없는 통화 등) 재시도 없이 ERROR 로그를 남기고 [DLT](#송금-완료-알림-dlt)로 보낸 뒤 다음 메시지로 넘어갑니다.
 2. 수신 기록 트랜잭션: `transfer_notifications`에 `insert ... on conflict (event_id) do nothing`. 처음 받은 이벤트만 `notified_at`이 빈 행으로 들어갑니다. 같은 트랜잭션에서 보낸 사람·받는 사람의 [화면 알림](#화면-알림-송금-완료)을 `user_notifications`에 한 행씩 만듭니다(`on conflict (event_id, user_id) do nothing`). 그래서 화면 알림은 Slack 설정·성공 여부와 관계없이 생깁니다.
 3. 알림 트랜잭션: 그 행을 `select ... for update`로 잠근 뒤
    - `notified_at`이 있으면 이미 알린 이벤트(중복 전달)라 끝납니다.
    - Webhook이 설정되지 않았으면 보내지 않고 끝납니다(행은 미발송으로 남음).
    - 아니면 Slack에 보내고, 성공하면 `notified_at`을 남기고 커밋합니다.
-4. Slack 전송이나 DB가 실패하면 알림 트랜잭션만 롤백되고, 1초 간격으로 2번 다시 처리합니다. 그래도 실패하면 ERROR 로그를 남기고 다음 메시지로 넘어갑니다. 수신 기록은 미발송(`notified_at` null)으로 남고, 같은 이벤트가 다시 오면(payment 재발행) 그때 보냅니다.
+4. Slack 전송이나 DB가 실패하면 알림 트랜잭션만 롤백되고, 1초 간격으로 2번 다시 처리합니다. 그래도 실패하면 ERROR 로그를 남기고 [DLT](#송금-완료-알림-dlt)로 보낸 뒤 다음 메시지로 넘어갑니다. 수신 기록은 미발송(`notified_at` null)으로 남고, 같은 이벤트가 다시 오면(DLT 재투입이나 payment 재발행) 그때 보냅니다.
 
 - 행 잠금 안에서 보내므로 같은 이벤트가 동시에 와도 한 번만 보냅니다. 다만 Slack 전송이 성공한 뒤 커밋이 실패하면 재처리에서 한 번 더 보낼 수 있습니다(at-least-once).
 - Slack 호출은 연결 2초·응답 3초에서 포기합니다. 알림 트랜잭션이 DB 연결과 행 잠금을 쥔 채 기다리므로 길게 두지 않습니다.
-- 포기한 이벤트를 자동으로 다시 보내는 스케줄러나 DLT는 없습니다. 미발송 건은 `select * from user_service.transfer_notifications where notified_at is null`로 봅니다.
+- 포기한 이벤트를 자동으로 다시 보내는 스케줄러는 없습니다. DLT에 남은 메시지를 운영자가 확인해 다시 넣습니다. 미발송 건은 `select * from user_service.transfer_notifications where notified_at is null`로도 봅니다. 수신 기록은 받은 지 30일이 지나면 알렸는지와 관계없이 지워지므로([보관 기간 정리](#보관-기간-정리)) 미발송 건도 그 안에 확인합니다.
+
+### 송금 완료 알림 DLT
+
+처리를 포기한 메시지는 `payment.transfer.completed.DLT`로 보냅니다(2026-11-21). 자동으로 다시 처리하지 않고, 지표·경보로 알아챈 뒤 운영자가 확인합니다.
+
+| 항목 | 내용 |
+|---|---|
+| 보내는 경우 | 형식 오류(`InvalidTransferEventException`, 재시도 없이 바로) / Slack·DB 오류 재시도(1초 간격 2번) 소진 |
+| 토픽 | `payment.transfer.completed.DLT`, 파티션 3, 보관 30일. 브로커 자동 생성이 꺼져 있어 소비자가 켜져 있을 때 user-service가 선언합니다(`TransferNotificationKafkaConfig`) |
+| 메시지 | 원본의 키(`transferId`)·값·헤더(`eventId` 포함) 그대로, 원본과 같은 파티션 번호 |
+| 추가 헤더 | `failureKind`(`invalid`·`exhausted`), `failureReason`(이 서비스 예외의 메시지만, 예: `…reason=HTTP 500`). Spring Kafka가 붙이는 `kafka_dlt-original-topic`·`-partition`·`-offset`·`-consumer-group`·`kafka_dlt-exception-fqcn`·`-cause-fqcn` |
+| 남기지 않는 것 | 예외 메시지(`kafka_dlt-exception-message`)·스택(`kafka_dlt-exception-stacktrace`). DB 예외 문구 같은 내부 정보가 담길 수 있어 뺍니다 |
+| 지표 | `transfer_notification_dead_letter_total{kind}` (DLT로 보낸 뒤에만 셈) |
+| 경보 | 로컬 Grafana `송금 완료 알림 DLT 적재`(최근 10분 증가 > 0), 대시보드 **비동기 처리** 행의 `송금 알림 DLT 적재` |
+| DLT 전송 실패 | Kafka 장애로 DLT에 못 보내면 그 메시지를 넘기지 않고 처음부터 다시 처리합니다(잃지 않음). 그동안 같은 파티션의 뒤 메시지는 기다립니다 |
+
+- 재투입: 원인을 해결한 뒤(Slack 복구 등) `exhausted` 메시지의 키·값·`eventId` 헤더를 원 토픽에 그대로 넣습니다. 소비자가 `eventId`로 중복을 거르므로 이미 알린 이벤트를 넣어도 다시 보내지 않습니다. `invalid`는 다시 넣어도 같은 이유로 DLT로 돌아오므로 넣지 않고, 발행 쪽(payment) 계약 위반을 확인합니다.
+- DLT 확인·재투입 명령과 운영 절차는 [송금 완료 알림 Kafka 가이드](transfer-notification-kafka.md#dlt-운영)에 있습니다. 재투입은 `TransferCompletedConsumerIntegrationTest`에서 DLT 메시지의 키·값·`eventId`를 원 토픽에 다시 넣어 Slack 전송·`notified_at` 기록까지 확인했고, 콘솔 명령은 로컬에서 직접 해 보지 않았습니다.
+- DLT 메시지를 다 처리해도 DLT에서 지우지 않습니다. 30일 보관 뒤 Kafka가 지웁니다. 어디까지 처리했는지는 오프셋으로 기록해 둡니다.
 
 ### 설정
 
@@ -460,6 +479,7 @@ payment-service가 발행하는 송금 완료 이벤트(`payment.transfer.comple
 | `travelpay.user.transfer-notification.consumer-enabled` | `true` | `false` | 끄면 컨테이너를 시작하지 않고, 이벤트는 토픽에 남아 켤 때 이어서 읽습니다 |
 | `travelpay.user.transfer-notification.concurrency` | `1` | `1` | 토픽 파티션(3)보다 많으면 남는 소비자는 쉽니다 |
 | `travelpay.user.transfer-notification.slack-webhook-url` | `${SLACK_WEBHOOK_URL:}` | 같음 | 비어 있으면 기록만 하고 보내지 않습니다 |
+| `spring.kafka.producer.*` | 문자열 직렬화, `acks=all`·멱등, `delivery.timeout.ms` 5초·`max.block.ms` 3초 | 같음(`application.yml`) | DLT로 보낼 때만 씁니다. Kafka가 멈췄을 때 소비자 스레드가 오래 멈추지 않도록 짧게 둡니다 |
 
 - **Webhook 주소는 비밀값입니다.** 환경 변수 `SLACK_WEBHOOK_URL`로만 넘기고 설정 파일·`.env.example`·문서·커밋에 적지 않습니다. 앱은 주소를 로그·예외 메시지에 남기지 않습니다(전송 실패는 `HTTP 500`이나 예외 종류만 남김).
 - 운영은 payment 발행기와 마찬가지로 운영 Kafka 주소를 인프라와 정할 때까지 꺼 둡니다. 켤 때는 컨슈머 그룹이 처음 붙으므로 토픽에 남은 이벤트를 처음부터 읽습니다(`auto-offset-reset: earliest`).
@@ -473,7 +493,7 @@ export SLACK_WEBHOOK_URL='<Slack Incoming Webhook 주소>'   # 없으면 기록�
 ./gradlew :user-service:bootRun
 ```
 
-payment-service도 발행기가 켜진 기본 설정으로 띄운 뒤 송금 하나를 완료하면 채널에 위 문구가 올라옵니다. Kafka 없이 띄울 때는 `--travelpay.user.transfer-notification.consumer-enabled=false`로 소비자를 끕니다(Kafka 없이 소비자를 켠 기동은 2026-11-20 기준 직접 확인하지 않음).
+payment-service도 발행기가 켜진 기본 설정으로 띄운 뒤 송금 하나를 완료하면 채널에 위 문구가 올라옵니다. 원 토픽은 payment-service가 만들므로, Kafka 볼륨이 새것이면 처음 한 번은 payment를 먼저 띄웁니다. 확인 명령과 장애 재현 절차는 [송금 완료 알림 Kafka 가이드](transfer-notification-kafka.md)에 있습니다. Kafka 없이 띄울 때는 `--travelpay.user.transfer-notification.consumer-enabled=false`로 소비자를 끕니다(Kafka 없이 소비자를 켠 기동은 2026-11-20 기준 직접 확인하지 않음).
 
 jar로 띄울 때도 환경 변수는 같은 방법으로 넘깁니다. 앱은 `.env`를 직접 읽지 않습니다.
 
@@ -515,7 +535,7 @@ payment 쪽 [로컬 수동 확인](payment-transfer.md#로컬-수동-확인-2026
 - `counterpartName`은 조회할 때 `users`에서 읽어 마스킹합니다(`홍*동`). 이름은 테이블에 저장하지 않으며, 회원을 찾지 못하면 `null`입니다.
 - 송금 상세는 `transferId`로 payment `GET /api/v1/transfers/{transferId}`를 부릅니다. 받는 사람에게는 `COMPLETED` 송금만 보이므로 알림의 송금은 항상 조회됩니다.
 - 운영은 소비자가 꺼져 있어([설정](#설정)) 화면 알림도 생기지 않습니다. 켜면 토픽에 남은 이벤트로 알림이 한꺼번에 생깁니다.
-- 보관 기간 정리(오래된 알림 삭제)는 없습니다(후속).
+- 읽은 알림은 발생 시각부터 90일이 지나면 지웁니다. 읽지 않은 알림은 기간이 지나도 남깁니다([보관 기간 정리](#보관-기간-정리)).
 
 ### API
 
@@ -562,6 +582,30 @@ Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 
 
 프런트 권장 사용법: 로그인 상태에서 `unread-count`를 30초마다 부르고 탭이 보이지 않을 때(`document.visibilityState`)는 멈춥니다. 개수가 늘면 목록을 다시 불러오고, 목록을 열거나 항목을 누를 때 읽음 표시를 보냅니다. 401이면 폴링을 멈춥니다.
 
+### 보관 기간 정리
+
+`NotificationRetentionScheduler`가 주기마다 `NotificationRetentionService`를 불러 보관 기간이 지난 행을 지웁니다(사용자 결정 2026-11-21).
+
+| 대상 | 기준 열 | 기간 | 조건 |
+|---|---|---|---|
+| 화면 알림 `user_notifications` | `occurred_at`(송금 완료 시각) | 90일 | 읽은 알림(`read_at is not null`)만. 읽지 않은 알림은 남김 |
+| 수신 기록 `transfer_notifications` | `received_at` | 30일 | 알렸는지(`notified_at`)와 관계없이 |
+
+- 기준 시각과 같은 행은 아직 기간 안으로 보고 남깁니다(`<` 비교).
+- 수신 기록은 Slack 중복 거르기에 쓰이므로, 지운 뒤 같은 이벤트가 다시 오면 한 번 더 보낼 수 있습니다. 그래서 토픽 보관 기간(Kafka 기본 7일)보다 길게 두고, 7일 미만 설정은 앱 시작 단계에서 거부합니다. 토픽 보관 기간을 늘리면 이 값도 그보다 길게 바꿉니다.
+- 한 트랜잭션에 `batch-size`행씩, 테이블마다 한 주기 최대 100번까지 지웁니다. 남은 행은 다음 주기에 이어서 지웁니다.
+- 다른 트랜잭션이 잠근 행(읽음 표시 중, Slack 전송 중)은 기다리지 않고 건너뜁니다(`for update skip locked`). 서버가 여러 대면 모두 돌지만 같은 행을 두고 기다리지 않고 결과도 같습니다.
+- 한 주기가 실패해도 에러 로그만 남기고 다음 주기는 돕니다. 지운 행이 있으면 `보관 기간이 지난 알림 정리 readNotifications=… transferEvents=…` 로그를 남깁니다.
+- V6 마이그레이션이 정리용 인덱스(`ix_user_notifications_read_occurred` 읽은 행 부분 인덱스, `ix_transfer_notifications_received`)를 만듭니다.
+
+| 키 | 로컬·운영 | 설명 |
+|---|---|---|
+| `travelpay.user.notification-retention.enabled` | `true` | `false`면 스케줄러를 등록하지 않음(테스트 공통 설정은 `false`) |
+| `travelpay.user.notification-retention.read-notification-retention` | `90d` | 1일 이상 |
+| `travelpay.user.notification-retention.transfer-event-retention` | `30d` | 7일 이상 |
+| `travelpay.user.notification-retention.batch-size` | `1000` | 1~10,000 |
+| `travelpay.user.notification-retention.initial-delay` / `fixed-delay` | `5m` / `1h` | 시작 후 첫 실행, 주기(이전 실행 종료 기준) |
+
 ## DB 스키마 (Flyway)
 
 테이블과 초기 데이터는 `user-service/src/main/resources/db/migration`의 `V번호__설명.sql` 파일로 관리합니다. 앱이 시작할 때 Flyway가 아직 적용하지 않은 파일만 번호 순서대로 실행하고 실행 기록을 `user_service.flyway_schema_history`에 남깁니다. Hibernate는 표를 만들거나 바꾸지 않고 엔티티와 맞는지 검사만 합니다(`ddl-auto: validate`).
@@ -573,6 +617,7 @@ Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 
 | `V3__add_users_session_version.sql` | 회원별 세션 버전 `session_version`(기존 회원은 0) |
 | `V4__create_transfer_notifications.sql` | 송금 완료 이벤트 수신 기록 `transfer_notifications`([송금 완료 알림](#송금-완료-알림-kafka--slack)) |
 | `V5__create_user_notifications.sql` | 회원 화면 알림 `user_notifications`, 유일 `(event_id, user_id)`, 목록·읽지 않은 개수 인덱스([화면 알림](#화면-알림-송금-완료)) |
+| `V6__add_notification_retention_indexes.sql` | 보관 기간 정리용 인덱스: 읽은 화면 알림 `occurred_at` 부분 인덱스, 수신 기록 `received_at`([보관 기간 정리](#보관-기간-정리)) |
 
 - 이미 적용한 파일은 고치지 않습니다. 고치면 앱이 시작할 때 검증에서 멈춥니다. 구조나 데이터를 바꿀 때는 다음 번호의 새 파일을 추가합니다.
 - 엔티티를 바꾸면 같은 작업에서 마이그레이션 파일도 추가합니다. `FlywayMigrationTest`가 마이그레이션 결과를 엔티티 기준 스키마와 비교해 다르면 실패합니다.
@@ -586,9 +631,9 @@ Eureka·user·wallet·ledger·payment와 Gateway를 jar로 띄우고(Gateway는 
 ./gradlew :user-service:test
 ```
 
-2026-11-21 기준(송금 완료 알림·화면 알림·일괄 이름 조회, 포크 `feat/353-transfer-kafka`) user-service 전체 78개 클래스 1,014건이 모두 통과합니다(실패·건너뜀 0, Testcontainers PostgreSQL·Redis·Kafka 포함, `--rerun`, 약 7분 45초).
+2026-11-21 기준(알림 보관 기간 정리·송금 완료 알림 DLT 추가, 포크 `feat/transfer-notification-ops`) user-service 전체 81개 클래스 1,027건이 모두 통과합니다(DLT는 기존 소비자 통합 테스트 2건을 바꿔 확인해 건수는 같음, `--rerun`)(실패·건너뜀 0, Testcontainers PostgreSQL·Redis·Kafka 포함).
 
-테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다. 소비자 테스트는 이벤트 하나로 화면 알림이 보낸 사람·받는 사람에게 한 행씩 생기는지, 재전달·Slack 실패에도 그대로인지도 봅니다. 화면 알림 조회·읽음은 `UserNotificationServiceIntegrationTest`(PostgreSQL)·`UserNotificationControllerTest`가 확인합니다. DB 테스트 공통 설정(`PostgresJpaTestConfiguration`)은 앱처럼 `currentSchema=user_service`로 연결해 스키마 이름 없는 native SQL도 같은 표를 씁니다.
+테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다. 송금 완료 알림 소비자 테스트(`TransferCompletedConsumerIntegrationTest`)만 Kafka 컨테이너(`apache/kafka:4.2.2`)를 더 띄우고, 나머지 테스트는 테스트 공통 설정(`src/test/resources/config/application.yml`)에서 소비자를 끕니다. 소비자 테스트는 이벤트 하나로 화면 알림이 보낸 사람·받는 사람에게 한 행씩 생기는지, 재전달·Slack 실패에도 그대로인지도 봅니다. 화면 알림 조회·읽음은 `UserNotificationServiceIntegrationTest`(PostgreSQL)·`UserNotificationControllerTest`가 확인합니다. 보관 기간 정리는 `NotificationRetentionServiceIntegrationTest`(PostgreSQL)가 읽은 오래된 알림·오래된 수신 기록만 지우는지, 배치를 나눠 지우는지, 잠긴 행을 건너뛰었다가 다음 주기에 지우는지 확인합니다. 테스트 공통 설정은 정리 스케줄러도 끕니다. DB 테스트 공통 설정(`PostgresJpaTestConfiguration`)은 앱처럼 `currentSchema=user_service`로 연결해 스키마 이름 없는 native SQL도 같은 표를 씁니다.
 
 비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 관리자 API는 실제 HTTP·PostgreSQL·Redis로 MASTER 권한·CSRF·세션 버전·검색·약관 등록을, 실제 PostgreSQL로 동시 정지·잠금 대기·약관 동시 등록을 확인합니다. 세션 Redis가 꺼진 상태와 메모리가 가득 찬 상태의 health도 확인합니다. API 문서는 실제 HTTP로 그룹·입력칸과 로그인·CSRF 표시가 실제 보안 동작과 같은지, 배포 설정에서 문서 주소가 꺼지는지 확인합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
 
